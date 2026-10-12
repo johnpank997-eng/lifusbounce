@@ -339,7 +339,7 @@ inline void NameTag(std::string_view value, bool show_name, bool show_icon, bool
                                 : ImVec2{};
     const float height = 24.0f * scale;
     const float icon_size = 24.0f * scale;
-    const float defuser_size = icon_size;
+    const float defuser_size = 16.0f * scale;
     const float gap = 3.0f * scale;
     const float name_gap = 5.0f * scale;
     float width = show_icon ? icon_size : 0.0f;
