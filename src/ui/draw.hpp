@@ -6,6 +6,7 @@
 #include <limits>
 #include <string_view>
 #include "sdk/skeleton.hpp"
+#include "sdk/operators.hpp"
 
 namespace base::draw {
 inline ImDrawList* List() {
@@ -321,6 +322,13 @@ inline void EquipmentLabel(std::string_view value, const ScreenBounds& bounds, I
     output->PopClipRect();
 }
 
+inline std::string_view PlayerLabel(std::string_view username, std::uint32_t operator_id) {
+    if (!username.empty())
+        return username;
+    const auto* value = sdk::operators::Find(operator_id);
+    return value && !value->name.empty() ? value->name : "Unknown";
+}
+
 inline void NameTag(std::string_view value, bool show_name, bool show_icon, bool show_defuser,
     ImTextureID texture, const ScreenBounds& bounds, ImVec2 viewport_size, ImU32 color, float distance,
     ImTextureID defuser_texture = ImTextureID{}) {
@@ -329,7 +337,7 @@ inline void NameTag(std::string_view value, bool show_name, bool show_icon, bool
     if (!show_name && !show_icon && !show_defuser)
         return;
     if (show_name && value.empty())
-        value = "unknown";
+        value = "Unknown";
     auto* font = ImGui::GetFont();
 
     const float scale = LabelScale(distance);

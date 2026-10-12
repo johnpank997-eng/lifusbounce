@@ -16,9 +16,9 @@ float Animate(const char* name, float target, float speed = 14.0f);
 bool ToggleRow(const char* label, bool* value, float* color);
 void CustomSlider(const char* label, float* value, float v_min, float v_max, float step = 0.1f);
 bool ChoiceRow(const char* label, const char* selected, bool dropdown = true);
-bool DebugControls();
+enum class DebugAction { none, reload, quit };
+DebugAction DebugControls();
 bool MenuFrame(ImVec2 position, int& selected);
-void DrawLoading(float progress, ImVec2 viewport);
 void DrawPlayerStatus(const char* text);
 
 struct Interaction {
@@ -26,7 +26,6 @@ struct Interaction {
     DWORD game_pid{};
     bool menu = true;
     bool loading = true;
-    bool loading_menu = false;
     bool panel_centered = false;
     float panel_x = 0.0f, panel_y = 0.0f;
     mutable float menu_alpha = 0.0f;
@@ -40,6 +39,12 @@ struct Interaction {
     bool ForegroundGame() const;
 
     bool Interactive() const;
+
+    bool ToggleMenu();
+
+    void BeginLoading();
+
+    void UpdateLoading(float progress);
 
     void ReleaseInput();
 

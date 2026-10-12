@@ -253,8 +253,11 @@ bool ActionButton(const char* label) {
     return pressed;
 }
 
-bool DebugControls() {
-    return ActionButton("reload software");
+DebugAction DebugControls() {
+    const bool reload = ActionButton("reload software");
+    ImGui::Dummy({0, 6});
+    const bool quit = ActionButton("self destruct");
+    return quit ? DebugAction::quit : reload ? DebugAction::reload : DebugAction::none;
 }
 
 bool MenuFrame(ImVec2 position, int& selected) {
@@ -296,40 +299,6 @@ bool MenuFrame(ImVec2 position, int& selected) {
     draw->AddLine({min.x + 4, min.y + 3}, {min.x + 12, min.y + 11}, color);
     draw->AddLine({min.x + 12, min.y + 3}, {min.x + 4, min.y + 11}, color);
     return close;
-}
-
-void DrawLoading(float progress, ImVec2 viewport) {
-    auto* output = draw::List();
-    const double time = ImGui::GetTime();
-    const ImVec2 center{viewport.x * 0.5f, std::max(64.0f, viewport.y - 96.0f)};
-    output->AddRectFilled(
-        {center.x - 144, center.y - 64}, {center.x + 144, center.y + 72}, IM_COL32(0, 0, 0, 255), 8);
-    constexpr const char* label = "loading...";
-    const auto text_size = ImGui::CalcTextSize(label);
-    draw::GradientText(output, {center.x - text_size.x * 0.5f, center.y - text_size.y * 0.5f}, label,
-        green_light, green_dark, time, 1.2f);
-
-    constexpr float tau = 6.28318530718f;
-    const float rotation = static_cast<float>(std::fmod(time * 0.8, 1.0)) * tau;
-    for (unsigned i = 0; i < 6; ++i) {
-        const float angle = rotation + static_cast<float>(i) * tau / 6.0f;
-        const auto color = LerpColor(green_dark, green_light, static_cast<float>(i) / 5.0f);
-        output->AddCircleFilled(
-            {center.x + std::cos(angle) * 11, center.y - 35 + std::sin(angle) * 11}, 2.3f, color, 16);
-    }
-
-    progress = std::clamp(progress, 0.0f, 1.0f);
-    constexpr float width = 240.0f;
-    const ImVec2 min{center.x - width * 0.5f, center.y + 22};
-    const ImVec2 max{min.x + width, min.y + 6};
-    output->AddRectFilled(min, max, IM_COL32(20, 65, 35, 170), 3);
-    if (progress > 0)
-        draw::GradientRect(
-            output, min, {min.x + width * progress, max.y}, green_dark, green_light, time, 1.2f, 3);
-    char percentage[8]{};
-    snprintf(percentage, sizeof(percentage), "%.1f%%", static_cast<double>(progress) * 100.0);
-    draw::GradientText(output, {center.x - ImGui::CalcTextSize(percentage).x * 0.5f, max.y + 8}, percentage,
-        green_light, green_dark, time, 1.2f);
 }
 
 void DrawPlayerStatus(const char* text) {

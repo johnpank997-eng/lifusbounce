@@ -158,6 +158,8 @@
     <ClCompile Include="src\sdk\weapon_native.cpp"><ObjectFileName>$(IntDir)sdk_weapon_native.obj</ObjectFileName></ClCompile>
     <ClCompile Include="src\ui\display_cache.cpp"><ObjectFileName>$(IntDir)ui_display_cache.obj</ObjectFileName></ClCompile>
     <ClCompile Include="src\ui\image_resources.cpp"><ObjectFileName>$(IntDir)ui_image_resources.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\loading.cpp"><ObjectFileName>$(IntDir)ui_loading.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\ui\loading.hpp" />
     <ClInclude Include="src\ui\image_resources.hpp" />
     <ClCompile Include="src\ui\game_target.cpp"><ObjectFileName>$(IntDir)ui_game_target.obj</ObjectFileName></ClCompile>
     <ClCompile Include="src\ui\interaction.cpp"><ObjectFileName>$(IntDir)ui_interaction.obj</ObjectFileName></ClCompile>

@@ -1,6 +1,7 @@
 #include "ui/overlay_internal.hpp"
 #include <imgui_impl_win32.h>
 #include <windowsx.h>
+#include <cmath>
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND, UINT, WPARAM, LPARAM);
 
 namespace base {
@@ -25,7 +26,28 @@ auto Interaction::ForegroundGame() const -> bool {
 }
 
 auto Interaction::Interactive() const -> bool {
-    return menu && (!loading || loading_menu) && ForegroundGame();
+    return (loading || menu) && ForegroundGame();
+}
+
+bool Interaction::ToggleMenu() {
+    if (loading)
+        return false;
+    menu = !menu;
+    return true;
+}
+
+void Interaction::BeginLoading() {
+    loading = true;
+    menu = false;
+    menu_alpha = 0.0f;
+    ReleaseInput();
+}
+
+void Interaction::UpdateLoading(float progress) {
+    if (loading && std::isfinite(progress) && progress >= 1.0f) {
+        loading = false;
+        ReleaseInput();
+    }
 }
 
 auto Interaction::ReleaseInput() -> void {

@@ -7,6 +7,7 @@
 #include "ui/theme.hpp"
 #include "ui/keybind.hpp"
 #include "ui/draw.hpp"
+#include "ui/loading.hpp"
 #include "ui/frame_pacing.hpp"
 #include <imgui.h>
 #include <imgui_impl_win32.h>
@@ -149,7 +150,6 @@ int RunOverlay(HINSTANCE instance) {
     DWORD reader_pid{};
     bool reader_enabled = false;
     bool insert_down = false, end_down = false;
-    bool hud_ready = false;
     std::string hud_text = "loading...";
     int exit_code = 0;
     bool scene_cleared = false, menu_cleared = false;
@@ -169,8 +169,7 @@ int RunOverlay(HINSTANCE instance) {
             break;
         const bool pid_changed = reader_pid != target.pid;
         if (pid_changed) {
-            hud_ready = false;
-            input.loading_menu = false;
+            input.BeginLoading();
             hud_text = "loading...";
             aiming.Reset();
             input.Hide();
@@ -192,6 +191,8 @@ int RunOverlay(HINSTANCE instance) {
             input.Hide();
             input.game = target.window;
         }
+        auto status = game.Status();
+        input.UpdateLoading(status.progress);
         const bool active = input.ForegroundGame();
         if (!active || !input.menu || input.loading)
             aim_key.Cancel();
@@ -201,13 +202,7 @@ int RunOverlay(HINSTANCE instance) {
             aiming.Reset();
         const bool insert = (GetAsyncKeyState(VK_INSERT) & 0x8000) != 0;
         const bool end = (GetAsyncKeyState(VK_END) & 0x8000) != 0;
-        if (active && !aim_key.Capturing() && insert && !insert_down) {
-            if (input.loading && !input.loading_menu) {
-                input.loading_menu = true;
-                input.menu = true;
-                menu_tab = 2;
-            } else
-                input.menu = !input.menu;
+        if (active && !aim_key.Capturing() && insert && !insert_down && input.ToggleMenu()) {
             if (input.menu) {
                 ClipCursor(nullptr);
             } else {
@@ -220,9 +215,6 @@ int RunOverlay(HINSTANCE instance) {
         end_down = end;
         if (done)
             break;
-        auto status = game.Status();
-        hud_ready = hud_ready || status.progress >= 1.0f;
-        input.loading = !hud_ready;
         const bool game_active = input.ForegroundGame();
         RECT client{};
         POINT origin{};
@@ -247,7 +239,7 @@ int RunOverlay(HINSTANCE instance) {
         if (resized || current.left != origin.x || current.top != origin.y)
             SetWindowPos(
                 window, HWND_TOPMOST, origin.x, origin.y, client.right, client.bottom, SWP_NOACTIVATE);
-        if (input.menu)
+        if (input.menu || input.loading)
             ClipCursor(nullptr);
         const float max_x = std::max(0.0f, static_cast<float>(client.right) - theme::panel_width);
         const float max_y = std::max(0.0f, static_cast<float>(client.bottom) - theme::panel_height);
@@ -260,22 +252,28 @@ int RunOverlay(HINSTANCE instance) {
             }
             input.panel_x = std::clamp(input.panel_x, 0.0f, max_x);
             input.panel_y = std::clamp(input.panel_y, 0.0f, max_y);
-            const RECT want{origin.x + static_cast<LONG>(input.panel_x),
-                origin.y + static_cast<LONG>(input.panel_y), std::min<LONG>(pw, client.right),
-                std::min<LONG>(ph, client.bottom)};
+            const LoadingLayout loading_layout(
+                {static_cast<float>(client.right), static_cast<float>(client.bottom)});
+            const RECT want = input.loading
+                ? RECT{origin.x + static_cast<LONG>(loading_layout.cancel_min.x),
+                    origin.y + static_cast<LONG>(loading_layout.cancel_min.y),
+                    static_cast<LONG>(loading_layout.cancel_size.x),
+                    static_cast<LONG>(loading_layout.cancel_size.y)}
+                : RECT{origin.x + static_cast<LONG>(input.panel_x),
+                    origin.y + static_cast<LONG>(input.panel_y), std::min<LONG>(pw, client.right),
+                    std::min<LONG>(ph, client.bottom)};
             if (std::memcmp(&want, &input.applied, sizeof(RECT)) != 0) {
                 SetWindowPos(
                     input.panel, HWND_TOPMOST, want.left, want.top, want.right, want.bottom, SWP_NOACTIVATE);
                 input.applied = want;
             }
         }
-        const bool menu_visible =
-            (!input.loading || input.loading_menu) && (input.menu || input.menu_alpha > 0.01f);
-        if (menu_visible && !IsWindowVisible(input.panel))
+        const bool panel_visible = input.loading || input.menu || input.menu_alpha > 0.01f;
+        if (panel_visible && !IsWindowVisible(input.panel))
             ShowWindow(input.panel, SW_SHOWNOACTIVATE);
-        else if (!menu_visible && IsWindowVisible(input.panel))
+        else if (!panel_visible && IsWindowVisible(input.panel))
             ShowWindow(input.panel, SW_HIDE);
-        if (menu_visible)
+        if (panel_visible)
             SetWindowPos(input.panel, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE);
         if (!IsWindowVisible(window))
             ShowWindow(window, SW_SHOWNOACTIVATE);
@@ -312,13 +310,14 @@ int RunOverlay(HINSTANCE instance) {
         ImGui::GetIO().DisplaySize = {static_cast<float>(client.right), static_cast<float>(client.bottom)};
         input.PollMouse();
         ImGui::NewFrame();
+        bool reload_started{};
 
-        const float menu_target = input.menu && (!input.loading || input.loading_menu) ? 1.0f : 0.0f;
+        const float menu_target = input.menu && !input.loading ? 1.0f : 0.0f;
         input.menu_alpha += (menu_target - input.menu_alpha) *
             (1.0f - std::exp(-22.0f * std::min(ImGui::GetIO().DeltaTime, 0.05f)));
         if (std::abs(menu_target - input.menu_alpha) < 0.001f)
             input.menu_alpha = menu_target;
-        if (input.menu_alpha > 0.01f) {
+        if (!input.loading && input.menu_alpha > 0.01f) {
             const float saved_alpha = ImGui::GetStyle().Alpha;
             ImGui::GetStyle().Alpha = input.menu_alpha;
             ui_alpha = input.menu_alpha;
@@ -407,12 +406,26 @@ int RunOverlay(HINSTANCE instance) {
                     CustomSlider("fov", &aim_settings.fov, 20.0f, 400.0f);
                     CustomSlider("smoothing", &aim_settings.smoothing, 1.0f, 20.0f);
                     CustomSlider("fov thickness", &fov_thickness, 1.0f, 3.0f);
-                } else if (DebugControls()) {
-                    game.Reload(sdk::ReloadTarget::all);
-                    display.Clear();
-                    cached_view.reset();
-                    aiming.Reset();
-                    status = game.Status();
+                } else {
+                    switch (DebugControls()) {
+                    case DebugAction::reload:
+                        input.BeginLoading();
+                        input.Hide();
+                        reload_started = true;
+                        aim_key.Cancel();
+                        hud_text = "loading...";
+                        display.Clear();
+                        cached_view.reset();
+                        aiming.Reset();
+                        game.Reload(sdk::ReloadTarget::all);
+                        status = game.Status();
+                        break;
+                    case DebugAction::quit:
+                        done = true;
+                        break;
+                    case DebugAction::none:
+                        break;
+                    }
                 }
 
                 ui_alpha = input.menu_alpha;
@@ -424,9 +437,17 @@ int RunOverlay(HINSTANCE instance) {
             ImGui::GetStyle().Alpha = saved_alpha;
             ui_alpha = 1.0f;
         }
+        if (done) {
+            ImGui::EndFrame();
+            break;
+        }
+        if (reload_started) {
+            ImGui::EndFrame();
+            continue;
+        }
         const auto size = ImGui::GetIO().DisplaySize;
         bool aim_updated = false;
-        if (aim_settings.enabled && aim_settings.show_fov)
+        if (!input.loading && aim_settings.enabled && aim_settings.show_fov)
             draw::Circle({size.x * 0.5f, size.y * 0.5f}, aim_settings.fov,
                 ImGui::ColorConvertFloat4ToU32({fov_color[0], fov_color[1], fov_color[2], 1.0f}),
                 fov_thickness);
@@ -435,7 +456,7 @@ int RunOverlay(HINSTANCE instance) {
         if (!render_status.frame && display.frame &&
             render_now - display.frame->captured < DisplayCache::retention)
             render_status.frame = display.frame;
-        if (game_active && render_status.pid == target.pid && render_status.frame &&
+        if (!input.loading && game_active && render_status.pid == target.pid && render_status.frame &&
             render_now - render_status.frame->captured < std::chrono::milliseconds(175)) {
             if (display.Update(render_status.frame)) {
                 cached_view.reset();
@@ -518,7 +539,8 @@ int RunOverlay(HINSTANCE instance) {
                             const ImU32 name_col = IM_COL32((int)(username_color[0] * 255),
                                 (int)(username_color[1] * 255), (int)(username_color[2] * 255), 255);
                             auto* texture = operator_esp ? badges.Get(entity.operator_id) : nullptr;
-                            draw::NameTag(entity.username, username_esp, operator_esp, show_defuser,
+                            draw::NameTag(draw::PlayerLabel(entity.username, entity.operator_id), username_esp,
+                                operator_esp, show_defuser,
                                 reinterpret_cast<ImTextureID>(texture), *bounds, size, name_col,
                                 label_distance, reinterpret_cast<ImTextureID>(defuser_texture.Get()));
                         }
@@ -544,14 +566,16 @@ int RunOverlay(HINSTANCE instance) {
             char debug[96];
             snprintf(debug, sizeof(debug), "players init: %u/%u | skeletons: %zu", status.frame->initialized,
                 status.frame->players, status.frame->GetPlayers().size());
-            if (hud_ready) {
+            if (!input.loading) {
                 hud_text = debug;
             }
         }
-        if (hud_ready)
+        if (!input.loading)
             DrawPlayerStatus(hud_text.c_str());
-        else if (input.menu_alpha <= 0.01f)
-            DrawLoading(status.progress, size);
+        else if (DrawLoading(status.progress, size)) {
+            ImGui::EndFrame();
+            break;
+        }
 
         ImGui::Render();
 
@@ -570,7 +594,8 @@ int RunOverlay(HINSTANCE instance) {
         scene_data.OwnerViewport = menu_data.OwnerViewport = output->OwnerViewport;
         menu_data.DisplayPos = {static_cast<float>(input.applied.left - origin.x),
             static_cast<float>(input.applied.top - origin.y)};
-        menu_data.DisplaySize = {theme::panel_width, theme::panel_height};
+        menu_data.DisplaySize =
+            {static_cast<float>(input.applied.right), static_cast<float>(input.applied.bottom)};
         for (auto* list : output->CmdLists) {
             if (list == ImGui::GetBackgroundDrawList())
                 scene_data.AddDrawList(list);
@@ -607,6 +632,7 @@ int RunOverlay(HINSTANCE instance) {
         }
     }
 
+    game.SetEnabled(false);
     input.Hide();
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();
