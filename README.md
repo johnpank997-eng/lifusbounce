@@ -2,11 +2,11 @@
 
 My 18th birthday special 💗🥳
 
-A Rainbow Six external cheat for the latest version (12.10.2026) that does not write memory, do whatever you want with this :)
+Im releasing a Rainbow Six external cheat for the latest version (12.10.2026) that does not write memory, do whatever you want with this :)
 
 it comes with a driver featuring DSE bypass
 
-##### ⚠️ *Tested on only 3 builds, so there could be QB issues!*
+##### ⚠️ *Tested on only 3 builds, so there could be QB issues! feel free to open issues*
 
 ## Features
 
@@ -27,3 +27,6 @@ it comes with a driver featuring DSE bypass
 - FOV circle
 - Smoothing
 - Custom keybinds
+
+---
+### ⭐ this repo for more :)
