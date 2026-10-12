@@ -1,0 +1,39 @@
+#include <Zycore/Defines.h>
+#include <Zycore/API/Process.h>
+
+#ifndef ZYAN_NO_LIBC
+
+#if defined(ZYAN_WINDOWS)
+#if   defined(ZYAN_KERNEL)
+#      include <wdm.h>
+#else
+#      include <windows.h>
+#endif
+#elif defined(ZYAN_POSIX)
+#   include <sys/mman.h>
+#else
+#   error "Unsupported platform detected"
+#endif
+
+ZyanStatus ZyanProcessFlushInstructionCache(void* address, ZyanUSize size)
+{
+#if   defined(ZYAN_WINDOWS)
+
+    if (!FlushInstructionCache(GetCurrentProcess(), address, size))
+    {
+        return ZYAN_STATUS_BAD_SYSTEMCALL;
+    }
+
+#elif defined(ZYAN_POSIX)
+
+    if (msync(address, size, MS_SYNC | MS_INVALIDATE))
+    {
+        return ZYAN_STATUS_BAD_SYSTEMCALL;
+    }
+
+#endif
+
+    return ZYAN_STATUS_SUCCESS;
+}
+
+#endif

@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{e4089d4b-5201-53b7-b699-29795840717f}</ProjectGuid>
+    <RootNamespace>lifus</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>Makefile</ConfigurationType>
+    <PlatformToolset>v145</PlatformToolset>
+    <UseDebugLibraries>false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <NMakeBuildCommandLine>"$(ProjectDir)build.cmd" --no-pause</NMakeBuildCommandLine>
+    <NMakeReBuildCommandLine>"$(ProjectDir)build.cmd" --no-pause</NMakeReBuildCommandLine>
+    <NMakeOutput>$(ProjectDir)..\bin\driver\lifus.sys</NMakeOutput>
+    <NMakePreprocessorDefinitions>_AMD64_;_WIN32;_WIN64;NDEBUG</NMakePreprocessorDefinitions>
+    <NMakeIncludeSearchPath>$(ProjectDir)include</NMakeIncludeSearchPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <ClCompile Include="src\lifus.c" />
+    <ClCompile Include="loader\loader.c" />
+    <ClInclude Include="include\lifus.h" />
+    <ClInclude Include="loader\rtcore64.h" />
+    <Inf Include="resources\lifus.inf" />
+    <ResourceCompile Include="resources\lifus.rc" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

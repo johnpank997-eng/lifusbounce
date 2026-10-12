@@ -1,0 +1,36 @@
+[Version]
+Signature = "$WINDOWS NT$"
+Class = System
+ClassGuid = {a80bdc22-58c3-5b09-a3b0-4c54bf6ac3ff}
+Provider = %ProviderName%
+CatalogFile = lifus.cat
+DriverVer = 08/30/2026,1.0.0.0
+PnpLockdown = 1
+[DestinationDirs]
+DefaultDestDir = 13
+[SourceDisksNames]
+1 = %DiskName%,,,""
+[SourceDisksFiles]
+lifus.sys = 1,,
+[Manufacturer]
+%ProviderName% = Standard,NT$ARCH$.10.0...16299
+[Standard.NT$ARCH$.10.0...16299]
+%DeviceDescription% = lifus_Device, Root\lifus
+[lifus_Device.NT]
+CopyFiles = DriverCopy
+[DriverCopy]
+lifus.sys
+[lifus_Device.NT.Services]
+AddService = lifus,%SPSVCINST_ASSOCSERVICE%,lifus_Service
+[lifus_Service]
+DisplayName = %ServiceDescription%
+ServiceType = 1
+StartType = 3
+ErrorControl = 1
+ServiceBinary = %13%\lifus.sys
+[Strings]
+SPSVCINST_ASSOCSERVICE = 0x00000002
+ProviderName = "lifus"
+DiskName = "lifus driver"
+DeviceDescription = "lifus device"
+ServiceDescription = "lifus driver"

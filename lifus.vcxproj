@@ -1,0 +1,166 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="debug|x64"><Configuration>debug</Configuration><Platform>x64</Platform></ProjectConfiguration>
+    <ProjectConfiguration Include="release|x64"><Configuration>release</Configuration><Platform>x64</Platform></ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{1490CD7E-20CF-4707-A913-C830154C1CB1}</ProjectGuid>
+    <RootNamespace>lifus</RootNamespace>
+    <ProjectName>lifus</ProjectName>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+    <Configuration Condition="'$(Configuration)'==''">release</Configuration>
+    <Platform Condition="'$(Platform)'==''">x64</Platform>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <PlatformToolset Condition="'$(PlatformToolset)'==''">v145</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <UseDebugLibraries Condition="'$(Configuration)'=='debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)'!='debug'">false</UseDebugLibraries>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)out\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)out\obj\$(Configuration)\</IntDir>
+    <TargetName>lifus</TargetName>
+    <GenerateManifest>false</GenerateManifest>
+    <LinkIncremental Condition="'$(Configuration)'=='release'">false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>src;resources;driver/loader;third_party/imgui;third_party/imgui/backends;third_party/zydis/include;third_party/zydis/src;third_party/zydis/dependencies/zycore/include;third_party/zydis/dependencies/zycore/src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_WIN32_WINNT=0x0a00;ZYDIS_STATIC_BUILD;ZYCORE_STATIC_BUILD;ZYDIS_DISABLE_ENCODER;IMGUI_DISABLE_DEMO_WINDOWS;IMGUI_DISABLE_DEBUG_TOOLS;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <WarningLevel>Level4</WarningLevel>
+      <ConformanceMode>true</ConformanceMode>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'!='debug'">MultiThreaded</RuntimeLibrary>
+      <Optimization Condition="'$(Configuration)'=='debug'">Disabled</Optimization>
+      <Optimization Condition="'$(Configuration)'!='debug'">MaxSpeed</Optimization>
+      <PreprocessorDefinitions Condition="'$(Configuration)'=='debug'">_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)'!='debug'">NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+      <ExceptionHandling>Sync</ExceptionHandling>
+      <MultiProcessorCompilation>false</MultiProcessorCompilation>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dwmapi.lib;user32.lib;gdi32.lib;dxgi.lib;dcomp.lib;windowscodecs.lib;winhttp.lib;dbghelp.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalOptions>/MANIFEST:NO %(AdditionalOptions)</AdditionalOptions>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <ProgramDatabaseFile>$(IntDir)$(TargetName).pdb</ProgramDatabaseFile>
+    </Link>
+    <ResourceCompile><AdditionalIncludeDirectories>resources;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\core\emulator.cpp"><ObjectFileName>$(IntDir)core_emulator.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\core\emulator.hpp" />
+    <ClCompile Include="src\core\disasm.cpp"><ObjectFileName>$(IntDir)core_disasm.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\reader.cpp"><ObjectFileName>$(IntDir)sdk_reader.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\gfx.cpp"><ObjectFileName>$(IntDir)ui_gfx.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\session.cpp"><ObjectFileName>$(IntDir)sdk_session.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\locator.cpp"><ObjectFileName>$(IntDir)sdk_locator.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\main.cpp"><ObjectFileName>$(IntDir)src_main.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\core\loader.c"><ObjectFileName>$(IntDir)core_loader.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\core\mem.cpp"><ObjectFileName>$(IntDir)core_mem.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\overlay.cpp"><ObjectFileName>$(IntDir)ui_overlay.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\skeleton.cpp"><ObjectFileName>$(IntDir)sdk_skeleton.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\imgui\imgui.cpp"><ObjectFileName>$(IntDir)third_party_imgui_imgui.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\imgui\imgui_draw.cpp"><ObjectFileName>$(IntDir)third_party_imgui_imgui_draw.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\imgui\imgui_tables.cpp"><ObjectFileName>$(IntDir)third_party_imgui_imgui_tables.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\imgui\imgui_widgets.cpp"><ObjectFileName>$(IntDir)third_party_imgui_imgui_widgets.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\imgui\backends\imgui_impl_win32.cpp"><ObjectFileName>$(IntDir)third_party_imgui_backends_imgui_impl_win32.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\imgui\backends\imgui_impl_dx11.cpp"><ObjectFileName>$(IntDir)third_party_imgui_backends_imgui_impl_dx11.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\MetaInfo.c"><ObjectFileName>$(IntDir)third_party_zydis_src_MetaInfo.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\Mnemonic.c"><ObjectFileName>$(IntDir)third_party_zydis_src_Mnemonic.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\Register.c"><ObjectFileName>$(IntDir)third_party_zydis_src_Register.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\Segment.c"><ObjectFileName>$(IntDir)third_party_zydis_src_Segment.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\SharedData.c"><ObjectFileName>$(IntDir)third_party_zydis_src_SharedData.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\String.c"><ObjectFileName>$(IntDir)third_party_zydis_src_String.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\Utils.c"><ObjectFileName>$(IntDir)third_party_zydis_src_Utils.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\Zydis.c"><ObjectFileName>$(IntDir)third_party_zydis_src_Zydis.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\Decoder.c"><ObjectFileName>$(IntDir)third_party_zydis_src_Decoder.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\DecoderData.c"><ObjectFileName>$(IntDir)third_party_zydis_src_DecoderData.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\Disassembler.c"><ObjectFileName>$(IntDir)third_party_zydis_src_Disassembler.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\Formatter.c"><ObjectFileName>$(IntDir)third_party_zydis_src_Formatter.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\FormatterBuffer.c"><ObjectFileName>$(IntDir)third_party_zydis_src_FormatterBuffer.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\FormatterATT.c"><ObjectFileName>$(IntDir)third_party_zydis_src_FormatterATT.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\FormatterBase.c"><ObjectFileName>$(IntDir)third_party_zydis_src_FormatterBase.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\src\FormatterIntel.c"><ObjectFileName>$(IntDir)third_party_zydis_src_FormatterIntel.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\API\Memory.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_API_Memory.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\API\Process.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_API_Process.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\API\Synchronization.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_API_Synchronization.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\API\Terminal.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_API_Terminal.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\API\Thread.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_API_Thread.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\Allocator.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_Allocator.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\ArgParse.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_ArgParse.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\Bitset.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_Bitset.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\Format.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_Format.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\List.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_List.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\String.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_String.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\Vector.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_Vector.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\zydis\dependencies\zycore\src\Zycore.c"><ObjectFileName>$(IntDir)third_party_zydis_dependencies_zycore_src_Zycore.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\core\disasm.hpp" />
+    <ClInclude Include="src\ui\draw.hpp" />
+    <ClInclude Include="src\sdk\bones.hpp" />
+    <ClInclude Include="src\sdk\player.hpp" />
+    <ClInclude Include="src\sdk\equipment.hpp" />
+    <ClInclude Include="src\sdk\operator_native.hpp" />
+    <ClInclude Include="src\sdk\operator_animation.hpp" />
+    <ClInclude Include="src\sdk\operator_definitions.hpp" />
+    <ClInclude Include="src\sdk\aim.hpp" />
+    <ClInclude Include="src\sdk\reader.hpp" />
+    <ClInclude Include="src\sdk\reload.hpp" />
+    <ClInclude Include="src\ui\gfx.hpp" />
+    <ClInclude Include="src\ui\frame_pacing.hpp" />
+    <ClInclude Include="src\core\loader.h" />
+    <ClInclude Include="src\core\handle.hpp" />
+    <ClInclude Include="src\sdk\locator.hpp" />
+    <ClInclude Include="src\sdk\operators.hpp" />
+    <ClInclude Include="src\core\mem.hpp" />
+    <ClInclude Include="src\ui\overlay.hpp" />
+    <ClInclude Include="src\ui\operator_badges.hpp" />
+    <ClInclude Include="src\sdk\session.hpp" />
+    <ClInclude Include="src\sdk\skeleton.hpp" />
+    <ClInclude Include="src\ui\theme.hpp" />
+    <ClInclude Include="src\ui\keybind.hpp" />
+    <ResourceCompile Include="resources\app.rc" />
+    <None Include="resources\app.manifest" />
+    <None Include="resources\operators.rc" />
+    <None Include="resources\operators\*.png" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\sdk\aim.cpp"><ObjectFileName>$(IntDir)sdk_aim.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\components.cpp"><ObjectFileName>$(IntDir)sdk_components.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\defuser.cpp"><ObjectFileName>$(IntDir)sdk_defuser.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\health.cpp"><ObjectFileName>$(IntDir)sdk_health.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\local_player.cpp"><ObjectFileName>$(IntDir)sdk_local_player.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\metadata.cpp"><ObjectFileName>$(IntDir)sdk_metadata.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\names.cpp"><ObjectFileName>$(IntDir)sdk_names.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\operators.cpp"><ObjectFileName>$(IntDir)sdk_operators.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\poses.cpp"><ObjectFileName>$(IntDir)sdk_poses.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\reader_context.cpp"><ObjectFileName>$(IntDir)sdk_reader_context.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\reader_memory.cpp"><ObjectFileName>$(IntDir)sdk_reader_memory.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\teams.cpp"><ObjectFileName>$(IntDir)sdk_teams.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\weapons.cpp"><ObjectFileName>$(IntDir)sdk_weapons.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\operator_badges.cpp"><ObjectFileName>$(IntDir)ui_operator_badges.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\window_surface.cpp"><ObjectFileName>$(IntDir)ui_window_surface.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\sdk\reader_internal.hpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="src\sdk\defuser_native.cpp"><ObjectFileName>$(IntDir)sdk_defuser_native.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\operator_animation.cpp"><ObjectFileName>$(IntDir)sdk_operator_animation.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\operator_definitions.cpp"><ObjectFileName>$(IntDir)sdk_operator_definitions.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\operator_native.cpp"><ObjectFileName>$(IntDir)sdk_operator_native.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\weapon_native.cpp"><ObjectFileName>$(IntDir)sdk_weapon_native.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\display_cache.cpp"><ObjectFileName>$(IntDir)ui_display_cache.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\game_target.cpp"><ObjectFileName>$(IntDir)ui_game_target.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\interaction.cpp"><ObjectFileName>$(IntDir)ui_interaction.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\ui\menu.cpp"><ObjectFileName>$(IntDir)ui_menu.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\ui\overlay_internal.hpp" />
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

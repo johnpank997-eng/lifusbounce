@@ -1,0 +1,6 @@
+#include <windows.h>
+#include "resource.h"
+1 RT_MANIFEST "app.manifest"
+IDR_FONT_VOLTE RCDATA "volte.ttf"
+IDR_DRIVER RCDATA "..\\bin\\driver\\lifus.sys"
+#include "operators.rc"
