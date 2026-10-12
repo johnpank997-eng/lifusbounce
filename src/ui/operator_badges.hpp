@@ -1,5 +1,6 @@
 #pragma once
 #include "ui/gfx.hpp"
+#include "ui/image_resources.hpp"
 #include <array>
 #include <cstdint>
 #include <string_view>
@@ -92,7 +93,7 @@ struct OperatorBadges {
         {"noor", 277},
     }};
     std::array<ComPtr<ID3D11ShaderResourceView>, assets.size()> textures;
-    bool Init(HINSTANCE instance, ID3D11Device* device);
+    bool Init(HINSTANCE instance, ID3D11Device* device, const ImageResources& images);
     ID3D11ShaderResourceView* Get(std::uint32_t id) const noexcept;
 };
 }

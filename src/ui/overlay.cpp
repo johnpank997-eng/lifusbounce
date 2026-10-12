@@ -63,8 +63,12 @@ int RunOverlay(HINSTANCE instance) {
     }
 
     Gfx renderer;
+    ImageResources images;
     OperatorBadges badges;
-    if (!renderer.Init(window, input.panel) || !badges.Init(instance, renderer.device.Get())) {
+    ComPtr<ID3D11ShaderResourceView> defuser_texture;
+    if (!renderer.Init(window, input.panel) || !images.Init() ||
+        !badges.Init(instance, renderer.device.Get(), images) ||
+        !images.Load(instance, IDR_DEFUSER, renderer.device.Get(), defuser_texture)) {
         DestroyWindow(input.panel);
         DestroyWindow(window);
         UnregisterClassW(cls.lpszClassName, instance);
@@ -516,7 +520,7 @@ int RunOverlay(HINSTANCE instance) {
                             auto* texture = operator_esp ? badges.Get(entity.operator_id) : nullptr;
                             draw::NameTag(entity.username, username_esp, operator_esp, show_defuser,
                                 reinterpret_cast<ImTextureID>(texture), *bounds, size, name_col,
-                                label_distance);
+                                label_distance, reinterpret_cast<ImTextureID>(defuser_texture.Get()));
                         }
                         if ((health_esp || health_number_esp) && entity.health && bounds)
                             draw::Health(*entity.health, pose.health, *bounds, size, health_esp);

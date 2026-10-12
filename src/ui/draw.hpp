@@ -321,19 +321,11 @@ inline void EquipmentLabel(std::string_view value, const ScreenBounds& bounds, I
     output->PopClipRect();
 }
 
-inline void DefuserIcon(ImDrawList* output, ImVec2 position, float size) {
-
-    const auto point = [&](float x, float y) { return ImVec2{position.x + size * x, position.y + size * y}; };
-    constexpr ImU32 yellow = IM_COL32(190, 150, 20, 255);
-    output->AddRectFilled(point(0.35f, 0.06f), point(0.70f, 0.16f), yellow);
-    output->AddRectFilled(point(0.35f, 0.16f), point(0.45f, 0.35f), yellow);
-    output->AddRectFilled(point(0.60f, 0.16f), point(0.70f, 0.35f), yellow);
-    output->AddRectFilled(point(0.0f, 0.35f), point(1.0f, 1.0f), yellow);
-}
-
 inline void NameTag(std::string_view value, bool show_name, bool show_icon, bool show_defuser,
-    ImTextureID texture, const ScreenBounds& bounds, ImVec2 viewport_size, ImU32 color, float distance) {
+    ImTextureID texture, const ScreenBounds& bounds, ImVec2 viewport_size, ImU32 color, float distance,
+    ImTextureID defuser_texture = ImTextureID{}) {
     show_icon = show_icon && texture != ImTextureID{};
+    show_defuser = show_defuser && defuser_texture != ImTextureID{};
     if (!show_name && !show_icon && !show_defuser)
         return;
     if (show_name && value.empty())
@@ -347,7 +339,7 @@ inline void NameTag(std::string_view value, bool show_name, bool show_icon, bool
                                 : ImVec2{};
     const float height = 24.0f * scale;
     const float icon_size = 24.0f * scale;
-    const float defuser_size = 16.0f * scale;
+    const float defuser_size = icon_size;
     const float gap = 3.0f * scale;
     const float name_gap = 5.0f * scale;
     float width = show_icon ? icon_size : 0.0f;
@@ -367,9 +359,10 @@ inline void NameTag(std::string_view value, bool show_name, bool show_icon, bool
         const ImVec2 icon{position.x, position.y + (height - icon_size) * 0.5f};
         output->AddImage(texture, icon, {icon.x + icon_size, icon.y + icon_size});
     }
-    if (show_defuser)
-        DefuserIcon(
-            output, {position.x + defuser_left, position.y + (height - defuser_size) * 0.5f}, defuser_size);
+    if (show_defuser) {
+        const ImVec2 icon{position.x + defuser_left, position.y + (height - defuser_size) * 0.5f};
+        output->AddImage(defuser_texture, icon, {icon.x + defuser_size, icon.y + defuser_size});
+    }
     if (show_name)
         ShadowText(output, font, font_size, {position.x + name_left, position.y + (height - size.y) * 0.5f},
             color, value);
