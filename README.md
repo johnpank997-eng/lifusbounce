@@ -8,6 +8,9 @@ it comes with a driver featuring DSE bypass
 
 ##### ⚠️ *Tested on only 3 builds, so there could be QB issues! feel free to open issues*
 
+<img width="547" height="171" alt="ss" src="https://github.com/user-attachments/assets/294b4969-39aa-42a8-9326-d8a742094b2f" />
+
+
 ## Features
 
 #### Visuals
