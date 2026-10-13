@@ -11,14 +11,23 @@ auto Reader::Implementation::RigFor(CachedEntity& c) -> AnimationView {
             const auto& path = native.rigs[i];
             cpu.Reset();
             cpu.Set(ZYDIS_REGISTER_RCX, c.animation_component);
-            if (!cpu.Run(path.code).Complete())
+            if (!cpu.Run(path.owner.code).Complete())
                 continue;
-            const auto rig = cpu.Get(path.output);
+            const auto rig = cpu.Get(path.owner.output);
             if (Hash(rig) != 0x4da91c62u)
                 continue;
-            if (matched && value.rig != rig)
+            const auto names = Q(rig + path.names_field);
+            const auto count = static_cast<std::uint32_t>(
+                (path.count_width == 64 ? Q(rig + path.names_field + 8)
+                                        : Read<std::uint32_t>(rig + path.names_field + 8)) &
+                0x3fffffffu);
+            if (!count || count > 4096 || !Pointer(names))
+                continue;
+            if (matched && (value.rig != rig || value.names != names || value.count != count))
                 throw ReadFailure{ERROR_DUP_NAME};
             value.rig = rig;
+            value.names = names;
+            value.count = count;
             if (!matched)
                 matched = i;
         } catch (ReadFailure failure) {
@@ -28,10 +37,6 @@ auto Reader::Implementation::RigFor(CachedEntity& c) -> AnimationView {
     if (!matched)
         throw ReadFailure{ERROR_NOT_READY};
     c.rig_path = matched;
-    value.names = Q(value.rig + names_field);
-    value.count = Read<std::uint32_t>(value.rig + names_field + 8) & 0x3fffffffu;
-    if (!value.count || value.count > 4096 || !Pointer(value.names))
-        throw ReadFailure{ERROR_INVALID_DATA};
     return value;
 }
 
@@ -103,11 +108,21 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
     if (!count || count > 4096)
         return std::nullopt;
     const auto names = animation.names;
-    const auto rig_names = Array<std::uint32_t>(names, count);
+
+    struct RigName {
+        std::uint32_t hash{};
+        std::uint16_t index{}, reserved{};
+        bool operator==(const RigName&) const = default;
+    };
+
+    const auto rig_names = Array<RigName>(names, count);
     std::vector<skeleton::PoseKey> keys;
     keys.reserve(count);
-    for (std::uint32_t i = 0; i < count; ++i)
-        keys.push_back({rig_names[i], i});
+    for (const auto& name : rig_names) {
+        if (name.index >= count)
+            return std::nullopt;
+        keys.push_back({name.hash, name.index});
+    }
     const bool rig_changed = c.rig != animation.rig || c.names != names || c.pose_count != count ||
         c.keys.size() != keys.size() ||
         !std::equal(c.keys.begin(), c.keys.end(), keys.begin(),
@@ -133,7 +148,7 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
     if (after.rig != animation.rig || after.names != names || after.count != count ||
         after.asset != animation.asset || after.buffer != animation.buffer ||
         Q(c.transform_component + 0xd0) != world || Read<skeleton::Matrix>(world + 0x10) != world_transform ||
-        Array<std::uint32_t>(names, count) != rig_names)
+        Array<RigName>(names, count) != rig_names)
         return std::nullopt;
     const auto confirmed = Array<std::byte>(animation.buffer, count * pose_stride);
     std::vector<skeleton::Point> points(count);

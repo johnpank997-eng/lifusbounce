@@ -171,7 +171,6 @@ struct Reader::Implementation {
         std::uint32_t count{};
     };
 
-    static constexpr Address names_field = 0xa0;
     static constexpr std::size_t pose_stride = 0x20;
 
     AnimationView RigFor(CachedEntity& c);

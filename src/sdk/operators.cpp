@@ -215,7 +215,7 @@ auto Reader::Implementation::OperatorFor(Address entity, const CachedEntity& c) 
 
 auto Reader::Implementation::UnownedModelFor(Address entity, const CachedEntity& c) -> bool {
     if (!selected || !c.username_component || c.name_profile || c.profile || !c.username.empty() ||
-        native.usernames.size() != 1 || c.username_index >= c.component_count)
+        (native.ownership.empty() && native.usernames.size() != 1) || c.username_index >= c.component_count)
         return false;
     try {
         const auto source_table = Q(c.username_component);
@@ -227,26 +227,45 @@ auto Reader::Implementation::UnownedModelFor(Address entity, const CachedEntity&
         };
         if (!stable() || Hash(c.username_component) != 0xd1d46a6fu)
             return false;
-        const auto& names = native.usernames.front();
-        const auto resolve_owner = [&] {
-            cpu.Reset(selected->teb);
-            cpu.Set(ZYDIS_REGISTER_RDX, c.username_component);
-            if (!cpu.Run(names.owner.code).Complete())
-                throw ReadFailure{ERROR_INVALID_DATA};
-            return cpu.Get(names.owner.output);
+        const auto inspect = [&](const auto& path) -> std::optional<std::pair<Address, bool>> {
+            const auto resolve_owner = [&] {
+                cpu.Reset(selected->teb);
+                cpu.Set(ZYDIS_REGISTER_RDX, c.username_component);
+                if (!cpu.Run(path.owner.code).Complete())
+                    throw ReadFailure{ERROR_INVALID_DATA};
+                return cpu.Get(path.owner.output);
+            };
+            const auto owner = resolve_owner(), table = Q(owner);
+            if (Hash(owner) != 0xc812b23du)
+                return std::nullopt;
+            const auto resolve_profile = [&] {
+                cpu.Reset(selected->teb);
+                cpu.Set(path.owner.output, owner);
+                if (!cpu.Run(path.profile.code).Complete())
+                    throw ReadFailure{ERROR_INVALID_DATA};
+                return cpu.Get(path.profile.output);
+            };
+            const auto profile = resolve_profile();
+            if ((profile && Hash(profile) != 0x5d19580bu) || resolve_owner() != owner || Q(owner) != table ||
+                resolve_profile() != profile || !stable())
+                return std::nullopt;
+            return std::pair{owner, profile == 0};
         };
-        const auto owner = resolve_owner(), table = Q(owner);
-        if (Hash(owner) != 0xc812b23du)
-            return false;
-        const auto resolve_profile = [&] {
-            cpu.Reset(selected->teb);
-            cpu.Set(names.owner.output, owner);
-            if (!cpu.Run(names.profile.code).Complete())
-                throw ReadFailure{ERROR_INVALID_DATA};
-            return cpu.Get(names.profile.output);
-        };
-        return resolve_profile() == 0 && resolve_owner() == owner && Q(owner) == table &&
-            resolve_profile() == 0 && stable();
+        if (native.ownership.empty()) {
+            const auto result = inspect(native.usernames.front());
+            return result && result->second;
+        }
+        std::optional<Address> accepted;
+        for (const auto& path : native.ownership)
+            try {
+                if (const auto result = inspect(path)) {
+                    if (!result->second || (accepted && *accepted != result->first))
+                        return false;
+                    accepted = result->first;
+                }
+            } catch (ReadFailure) {
+            }
+        return accepted.has_value();
     } catch (ReadFailure) {
         return false;
     }

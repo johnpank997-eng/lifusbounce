@@ -16,6 +16,12 @@ struct Expression {
     std::uint32_t inputs{};
 };
 
+struct RigDescriptor {
+    Expression owner;
+    std::uint32_t names_field{};
+    std::uint8_t count_width{};
+};
+
 struct Location {
     ZydisRegister reg = ZYDIS_REGISTER_NONE;
     std::int64_t slot{};
@@ -78,6 +84,13 @@ struct UsernameDescriptor {
     std::uint32_t string_field{};
 };
 
+struct OwnershipDescriptor {
+    Expression owner, profile;
+    std::uint64_t owner_type{}, profile_type{};
+};
+
+[[nodiscard]] std::optional<OwnershipDescriptor> OwnerProfile(const Emulator::Program& code);
+
 struct HealthDescriptor {
     Emulator::Program code;
     ZydisRegister maximum{}, current{};
@@ -113,11 +126,13 @@ struct AffiliationDescriptor {
 
 struct NativeDescriptor {
     std::vector<FunctionRecord> functions;
-    std::vector<Expression> roots, cameras, managers, contexts, rigs;
+    std::vector<Expression> roots, cameras, managers, contexts;
+    std::vector<RigDescriptor> rigs;
     std::vector<MetadataDescriptor> metadata;
     std::vector<ArrayDescriptor> arrays;
     std::vector<PoseDescriptor> poses;
     std::vector<UsernameDescriptor> usernames;
+    std::vector<OwnershipDescriptor> ownership;
     std::vector<HealthDescriptor> health;
     std::vector<AffiliationDescriptor> affiliations;
     std::optional<std::uint32_t> local_profile_field;

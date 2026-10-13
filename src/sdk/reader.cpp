@@ -12,8 +12,8 @@ auto Reader::Implementation::Poll(std::stop_token stop) -> std::shared_ptr<const
         if (!selected) {
             if (now < next_selection)
                 return {};
-            next_selection = now + std::chrono::milliseconds(50);
             if (!Select(stop)) {
+                next_selection = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
                 if (emulation_error)
                     message = EmulationMessage();
                 return {};
