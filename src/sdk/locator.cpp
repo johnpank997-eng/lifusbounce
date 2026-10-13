@@ -1100,7 +1100,7 @@ std::optional<MetadataDescriptor> Metadata(const Emulator::Program& code) {
     return std::nullopt;
 }
 
-std::optional<Expression> Root(const Emulator::Program& code) {
+std::optional<Expression> Root(const Emulator::Program& code, const ValidationObserver& validation) {
     bool ring = false, divide = false, stride = false;
     for (const auto& d : code.instructions)
         for (unsigned j = 0; j < d.instruction.operand_count_visible; ++j) {
@@ -1111,8 +1111,14 @@ std::optional<Expression> Root(const Emulator::Program& code) {
             divide |= o.imm.value.u == 0xc350;
             stride |= o.imm.value.u == 0x198;
         }
-    if (!ring || !divide || !stride)
+    if (!ring || !divide || !stride) {
+        if (validation)
+            validation(!ring  ? "root ring anchor missing"
+                    : !divide ? "root divisor anchor missing"
+                              : "root stride anchor missing",
+                code.begin, (ring ? 1u : 0u) | (divide ? 2u : 0u) | (stride ? 4u : 0u));
         return std::nullopt;
+    }
     for (std::size_t j = 0; j < code.instructions.size(); ++j) {
         const auto& d = code.instructions[j];
         if (d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV || d.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
@@ -1120,8 +1126,13 @@ std::optional<Expression> Root(const Emulator::Program& code) {
             d.operands[1].mem.base == ZYDIS_REGISTER_RSP || d.operands[1].mem.disp.value <= 0)
             continue;
         auto result = Slice(code, j, d.operands[1].mem.base);
-        if (!result || result->inputs || result->code.instructions.empty())
+        if (!result || result->inputs || result->code.instructions.empty()) {
+            if (validation)
+                validation(
+                    !result ? "root receiver dataflow unresolved" : "root receiver requires external inputs",
+                    d.address, result ? result->inputs : 0);
             continue;
+        }
         const auto& tail = result->code.instructions.back();
         const bool tls = tail.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
             tail.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY && tail.operands[1].mem.scale == 8 &&
@@ -1137,7 +1148,11 @@ std::optional<Expression> Root(const Emulator::Program& code) {
                 });
         if (!tls)
             return result;
+        if (validation)
+            validation("root receiver is a tls container", d.address, 0);
     }
+    if (validation)
+        validation("root receiver not proven", code.begin, 0);
     return std::nullopt;
 }
 
@@ -2275,7 +2290,8 @@ static std::optional<AffiliationDescriptor> Affiliation(
 
 NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rva, std::uint64_t module,
     std::span<const FunctionRecord> functions, std::stop_token stop,
-    const std::function<void(std::size_t, std::size_t)>& progress, const DiscoveryObserver& observer) {
+    const std::function<void(std::size_t, std::size_t)>& progress, const DiscoveryObserver& observer,
+    const ScanObserver& checkpoint, const ValidationObserver& validation) {
     NativeDescriptor result;
     result.functions.assign(functions.begin(), functions.end());
     std::map<std::vector<std::uint64_t>, MetadataDescriptor> metadata;
@@ -2292,6 +2308,8 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
         if (progress && index % 512 == 0)
             progress(index, functions.size());
         const auto& f = functions[index];
+        if (checkpoint)
+            checkpoint("function", index, f);
         if (f.begin < code_rva || f.end <= f.begin || f.begin - code_rva >= code.size() ||
             f.end - f.begin > code.size() - (f.begin - code_rva))
             continue;
@@ -2319,6 +2337,8 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
         const bool root_anchor =
             bytes.size() < 0x4000 && contains(bytes, 0x14f8b589) && contains(bytes, 0xc350);
         if (bytes.size() < 0x4000 && contains(bytes, 0x1d2e4b8f)) {
+            if (checkpoint)
+                checkpoint("health", index, f);
             const auto before = result.health.size();
             auto decoded = Emulator::Decode(bytes, module + f.begin, true);
             if (decoded)
@@ -2328,6 +2348,8 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                 observer("health", f, bytes, decoded ? &*decoded : nullptr, result.health.size() - before);
         }
         if (bytes.size() < 0x10000 && contains(bytes, 0xa9cefd4a)) {
+            if (checkpoint)
+                checkpoint("rig", index, f);
             const auto before = result.rigs.size();
             auto decoded = Emulator::Decode(bytes, module + f.begin, true);
             if (decoded) {
@@ -2373,6 +2395,8 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                     break;
                 }
         if (array_anchor) {
+            if (checkpoint)
+                checkpoint("array", index, f);
             const auto before = result.arrays.size();
             auto decoded = Emulator::Decode(bytes, module + f.begin, true);
             if (decoded) {
@@ -2392,10 +2416,12 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                     break;
                 }
         if (pose_anchor) {
+            if (checkpoint)
+                checkpoint("pose", index, f);
             const auto before = result.poses.size();
             auto decoded = Emulator::Decode(bytes, module + f.begin, true);
             if (decoded) {
-                auto values = Poses(*decoded);
+                auto values = Poses(*decoded, validation);
                 result.poses.insert(result.poses.end(), std::make_move_iterator(values.begin()),
                     std::make_move_iterator(values.end()));
             }
@@ -2403,11 +2429,13 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                 observer("pose", f, bytes, decoded ? &*decoded : nullptr, result.poses.size() - before);
         }
         if (root_anchor || camera_anchor || manager_anchor) {
+            if (checkpoint)
+                checkpoint(root_anchor ? "root_context" : camera_anchor ? "camera" : "manager", index, f);
             const auto roots_before = result.roots.size(), cameras_before = result.cameras.size(),
                        managers_before = result.managers.size();
             auto decoded = Emulator::Decode(bytes, module + f.begin, true);
             if (decoded && root_anchor)
-                if (auto value = Root(*decoded)) {
+                if (auto value = Root(*decoded, validation)) {
                     std::optional<Expression> context;
                     const auto& instructions = decoded->instructions;
                     for (std::size_t j = 0; j + 5 < instructions.size(); ++j) {
@@ -2511,7 +2539,8 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                     if (context) {
                         result.roots.push_back(std::move(*value));
                         result.contexts.push_back(std::move(*context));
-                    }
+                    } else if (validation)
+                        validation("root context helper proof missing", module + f.begin, 0);
                 }
             if (decoded && camera_anchor)
                 if (auto value = Camera(*decoded))
@@ -2535,6 +2564,8 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
         }
         if (!object)
             continue;
+        if (checkpoint)
+            checkpoint("metadata", index, f);
         auto decoded =
             Emulator::Decode(prefix.first(std::min<std::size_t>(prefix.size(), 128)), module + f.begin, true);
         auto candidate = decoded ? locators::Metadata(*decoded) : std::nullopt;
@@ -2724,9 +2755,21 @@ std::vector<Expression> Manager(const Emulator::Program& code) {
     return result;
 }
 
-std::vector<PoseDescriptor> Poses(const Emulator::Program& code) {
+std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const ValidationObserver& validation) {
     std::vector<PoseDescriptor> result;
     const auto& instructions = code.instructions;
+    std::string_view reason = "pose native vector access not found";
+    std::uint64_t reason_at = code.begin, observed{};
+    unsigned reached{};
+    const auto failed = [&](unsigned depth, std::string_view text, std::uint64_t at,
+                            std::uint64_t value = 0) {
+        if (depth >= reached) {
+            reached = depth;
+            reason = text;
+            reason_at = at;
+            observed = value;
+        }
+    };
     const auto target = [&](const Emulator::Decoded& d) {
         if (d.operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || !d.operands[0].imm.is_relative)
             return instructions.size();
@@ -2747,6 +2790,10 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code) {
                 d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVDQA ||
                 d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVDQU;
         };
+        if (vector_load(a) && vector_load(b) && a.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+            b.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY)
+            failed(1, "pose vector index or 0x20 stride not proven", a.address,
+                shift.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE ? shift.operands[1].imm.value.u : 0);
         if (!vector_load(a) || !vector_load(b) || a.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
             b.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
             a.operands[1].mem.base != b.operands[1].mem.base ||
@@ -2775,11 +2822,15 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code) {
             asset = o.mem.base;
             break;
         }
-        if (flag == pair)
+        if (flag == pair) {
+            failed(2, "pose owning asset flag not found", a.address);
             continue;
+        }
         auto buffer = Flow(code, flag, pair, {asset}, {a.operands[1].mem.base});
-        if (!buffer)
+        if (!buffer) {
+            failed(3, "pose buffer dataflow not proven", a.address);
             continue;
+        }
 
         auto consume = flag;
         auto decoded_asset = asset;
@@ -2824,8 +2875,11 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code) {
             }
             break;
         }
-        if (consume == flag)
+        if (consume == flag) {
+            failed(4, "pose asset xor and conditional owner not proven", instructions[flag].address);
             continue;
+        }
+        failed(5, "pose selector branches or asset dataflow not proven", instructions[consume].address);
         for (std::size_t branch = 1; branch < flag; ++branch) {
             auto test_index = branch - 1;
             while (test_index > 0 && branch - test_index < 8) {
@@ -2926,6 +2980,8 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code) {
             }
         }
     }
+    if (validation && result.empty())
+        validation(reason, reason_at, observed);
     return result;
 }
 }

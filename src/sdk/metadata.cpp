@@ -26,7 +26,8 @@ auto Reader::Implementation::Hash(Address object) -> std::uint32_t {
     TypeInfo(object);
     cpu.Reset();
     cpu.Set(ZYDIS_REGISTER_RCX, object);
-    const auto result = cpu.Run(metadata->decode.code);
+    const auto result =
+        trace.Execute(cpu, metadata->decode.code, "metadata_decode", metadata->table_field, module.address);
     if (!result.Complete()) {
         trace.Emulation("metadata_decode_failed", 0, result, module.address);
         throw ReadFailure{ERROR_NOT_SUPPORTED};

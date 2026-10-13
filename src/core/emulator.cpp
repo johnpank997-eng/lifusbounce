@@ -74,7 +74,7 @@ void Emulator::Reset(std::uint64_t teb) noexcept {
     vectors_.fill({});
     stack_.fill(std::byte{});
     inputs_.clear();
-    ip_ = next_ = 0;
+    ip_ = next_ = current_ = 0;
     gs_ = teb;
     flags_ = 2;
     address_width_ = 64;
@@ -149,19 +149,28 @@ std::uint64_t Emulator::Load(std::uint64_t at, unsigned bits) const {
     const auto bytes = bits / 8;
     Mask(bits);
     std::uint64_t result{};
-    if (Contains(stack_base, stack_.size(), at, bytes))
+    const auto report = [&](DWORD error, bool supplied = false, bool stack = false) {
+        if (observer_.read)
+            observer_.read(observer_.context, {current_, at, result, bits, error, supplied, stack});
+    };
+    if (Contains(stack_base, stack_.size(), at, bytes)) {
         std::memcpy(&result, stack_.data() + at - stack_base, bytes);
-    else {
+        report(ERROR_SUCCESS, false, true);
+    } else {
         const auto found = std::find_if(inputs_.begin(), inputs_.end(),
             [&](const Region& r) { return Contains(r.address, r.bytes.size(), at, bytes); });
-        if (found != inputs_.end())
+        if (found != inputs_.end()) {
             std::memcpy(&result, found->bytes.data() + at - found->address, bytes);
-        else {
+            report(ERROR_SUCCESS, true);
+        } else {
             if (at <= 0x1000 || at >= 0x800000000000ull || bytes > 0x800000000000ull - at ||
-                (at < stack_base + stack_.size() && at + bytes > stack_base))
+                (at < stack_base + stack_.size() && at + bytes > stack_base)) {
+                report(ERROR_INVALID_ADDRESS);
                 throw Fault{EmulationStatus::read_failed};
+            }
             const auto got = process_.ReadBytes(
                 static_cast<std::uintptr_t>(at), std::as_writable_bytes(std::span(&result, 1)).first(bytes));
+            report(got.error);
             if (!got.Complete())
                 throw Fault{EmulationStatus::read_failed};
         }
@@ -597,6 +606,7 @@ EmulationResult Emulator::Run(const Program& code, std::size_t budget) {
                 return result;
             }
             next_ = instruction.address + instruction.instruction.length;
+            current_ = instruction.address;
             ip_ = next_;
             address_width_ = instruction.instruction.address_width;
             ++result.steps;
@@ -630,6 +640,7 @@ EmulationResult Emulator::Run(const Program& code, std::size_t budget) {
         }
         result.mnemonic = found->instruction.mnemonic;
         next_ = ip_ + found->instruction.length;
+        current_ = found->address;
         ip_ = next_;
         address_width_ = found->instruction.address_width;
         ++result.steps;

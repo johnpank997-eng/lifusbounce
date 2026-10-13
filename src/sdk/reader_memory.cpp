@@ -37,8 +37,8 @@ auto Reader::Implementation::Q(Address at) -> Address {
     return Read<Address>(at);
 }
 
-auto Reader::Implementation::Evaluate(const locators::PointerDescriptor& path, Address teb, Address object)
-    -> Address {
+auto Reader::Implementation::Evaluate(const locators::PointerDescriptor& path, Address teb, Address object,
+    std::string_view stage, std::size_t index) -> Address {
     const auto put = [&](locators::Location at, Address value) {
         if (at.stack)
             cpu.Stack(static_cast<std::uint32_t>(at.slot), value);
@@ -53,7 +53,9 @@ auto Reader::Implementation::Evaluate(const locators::PointerDescriptor& path, A
     for (const auto& seed : path.seeds) {
         cpu.Reset(teb);
         put(path.input, object);
-        const auto result = cpu.Run(seed.value.code);
+        const auto result = stage.empty()
+            ? cpu.Run(seed.value.code)
+            : trace.Execute(cpu, seed.value.code, "pose_seed", index * 32 + seeds.size(), module.address);
         if (!result.Complete()) {
             trace.Emulation("pointer_seed_emulation_failed", seeds.size(), result, module.address);
             emulation_error = result;
@@ -65,7 +67,8 @@ auto Reader::Implementation::Evaluate(const locators::PointerDescriptor& path, A
     put(path.input, object);
     for (std::size_t j = 0; j < seeds.size(); ++j)
         put(path.seeds[j].target, seeds[j]);
-    const auto result = cpu.Run(path.code);
+    const auto result =
+        stage.empty() ? cpu.Run(path.code) : trace.Execute(cpu, path.code, stage, index, module.address);
     if (!result.Complete()) {
         trace.Emulation("pointer_emulation_failed", 0, result, module.address);
         emulation_error = result;

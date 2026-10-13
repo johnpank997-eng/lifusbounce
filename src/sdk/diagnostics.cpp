@@ -66,6 +66,29 @@ void DiscoveryDiagnostics::Observe(std::string_view role, const locators::Functi
         count.decoded += decoded ? 1 : 0;
         count.accepted += accepted;
         count.accepted_functions += accepted ? 1 : 0;
+        if (decoded && (role == "root_context" || (role == "pose" && (accepted || count.examples < 6)))) {
+            unsigned calls{};
+            for (const auto& instruction : decoded->instructions) {
+                if (instruction.instruction.mnemonic != ZYDIS_MNEMONIC_CALL ||
+                    instruction.operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+                    !instruction.operands[0].imm.is_relative || calls++ >= 64)
+                    continue;
+                const auto target = instruction.address + instruction.instruction.length +
+                    instruction.operands[0].imm.value.s;
+                diagnostics::Write("native_helper_edge",
+                    {{"role", role}, {"function_rva", diagnostics::Hex(function.begin)},
+                        {"call_rva", diagnostics::Hex(instruction.address - module_)},
+                        {"target_rva",
+                            target >= module_ ? diagnostics::Hex(target - module_) : "outside image"}});
+            }
+        }
+        if ((role == "root_context" || role == "pose" || accepted) && inventory_ < 20000) {
+            ++inventory_;
+            diagnostics::Write("discovery_result",
+                {{"role", role}, {"begin_rva", diagnostics::Hex(function.begin)},
+                    {"end_rva", diagnostics::Hex(function.end)}, {"decoded", decoded != nullptr},
+                    {"accepted_descriptors", accepted}, {"function_index", index_}});
+        }
         if (count.examples >= 6)
             return;
         ++count.examples;
@@ -79,6 +102,24 @@ void DiscoveryDiagnostics::Observe(std::string_view role, const locators::Functi
                     !decoded       ? "native decode rejected"
                         : accepted ? "accepted"
                                    : "semantic proof rejected"}});
+        if (decoded && !accepted && role == "root_context") {
+            diagnostics::Write("root_function_detail",
+                {{"instructions", decoded->instructions.size()}, {"code_artifact_required", true}});
+            const auto& code = *decoded;
+            ZydisFormatter formatter{};
+            ZydisFormatterInit(&formatter, ZYDIS_FORMATTER_STYLE_INTEL);
+            for (std::size_t i = 0; i < std::min<std::size_t>(code.instructions.size(), 8192); ++i) {
+                const auto& instruction = code.instructions[i];
+                std::array<char, 320> text{};
+                const auto formatted = ZydisFormatterFormatInstruction(&formatter, &instruction.instruction,
+                    instruction.operands.data(), instruction.instruction.operand_count_visible, text.data(),
+                    text.size(), instruction.address - module_, nullptr);
+                diagnostics::Write("root_instruction",
+                    {{"function_rva", diagnostics::Hex(function.begin)}, {"ordinal", i},
+                        {"rva", diagnostics::Hex(instruction.address - module_)},
+                        {"text", ZYAN_SUCCESS(formatted) ? text.data() : "format unavailable"}});
+            }
+        }
         if (decoded && !accepted)
             ReportProgram(role, count.examples - 1, *decoded, module_);
     } catch (...) {
@@ -93,6 +134,52 @@ void DiscoveryDiagnostics::Report() const noexcept {
                 {"decode_rejected", count.candidates - count.decoded},
                 {"semantic_rejected", count.decoded - count.accepted_functions},
                 {"examples", count.examples}});
+    for (const auto& [rule, count] : validations_)
+        diagnostics::Write("validation_count", {{"rule", rule}, {"count", count}});
+    diagnostics::Write("discovery_inventory",
+        {{"records", inventory_}, {"limit", 20000u}, {"complete", inventory_ < 20000},
+            {"validation_examples", validation_examples_}});
+}
+
+void DiscoveryDiagnostics::Enter(
+    std::string_view stage, std::size_t index, const locators::FunctionRecord& function) noexcept {
+    stage_ = stage;
+    index_ = index;
+    current_ = function;
+    const auto now = std::chrono::steady_clock::now();
+    if (now - checkpoint_at_ >= std::chrono::seconds(1)) {
+        checkpoint_at_ = now;
+        try {
+            diagnostics::Write("scan_checkpoint",
+                {{"stage", stage}, {"function_index", index}, {"begin_rva", diagnostics::Hex(function.begin)},
+                    {"end_rva", diagnostics::Hex(function.end)}});
+        } catch (...) {
+        }
+    }
+}
+
+void DiscoveryDiagnostics::Validation(
+    std::string_view rule, std::uint64_t instruction, std::uint64_t observed) noexcept {
+    try {
+        ++validations_[rule];
+        if (validation_examples_++ < 4000)
+            diagnostics::Write("discovery_validation",
+                {{"rule", rule}, {"stage", stage_}, {"function_rva", diagnostics::Hex(current_.begin)},
+                    {"instruction_rva", diagnostics::Hex(instruction - module_)},
+                    {"observed", diagnostics::Hex(observed)}, {"function_index", index_}});
+    } catch (...) {
+    }
+}
+
+void DiscoveryDiagnostics::Failure(const std::exception& error) const noexcept {
+    try {
+        diagnostics::Write("scan_exception_context",
+            {{"stage", stage_}, {"function_index", index_}, {"begin_rva", diagnostics::Hex(current_.begin)},
+                {"end_rva", diagnostics::Hex(current_.end)}});
+        diagnostics::Exception("native discovery", error);
+        Report();
+    } catch (...) {
+    }
 }
 
 void ReportNative(const locators::NativeDescriptor& native, std::uint64_t module) noexcept {
@@ -162,6 +249,17 @@ void RuntimeDiagnostics::Count(std::string_view name) noexcept {
     }
 }
 
+void RuntimeDiagnostics::Probe(std::string_view stage, std::size_t index, std::uint64_t address,
+    std::uint64_t value, bool accepted) noexcept {
+    try {
+        if (probes.size() < 256 && probes.emplace(stage, index, accepted).second)
+            diagnostics::Write("runtime_probe",
+                {{"stage", stage}, {"path_index", index}, {"address", diagnostics::Hex(address)},
+                    {"value", diagnostics::Hex(value)}, {"accepted", accepted}});
+    } catch (...) {
+    }
+}
+
 void RuntimeDiagnostics::Error(std::string_view stage, DWORD error) noexcept {
     try {
         Count(stage);
@@ -173,7 +271,7 @@ void RuntimeDiagnostics::Error(std::string_view stage, DWORD error) noexcept {
 
 bool RuntimeDiagnostics::Run(Emulator& cpu, const Emulator::Program& code, std::string_view stage,
     std::size_t index, std::uint64_t module) {
-    const auto result = cpu.Run(code);
+    const auto result = Execute(cpu, code, stage, index, module);
     if (result.Complete())
         return true;
     Emulation(stage, index, result, module);
@@ -204,5 +302,8 @@ void RuntimeDiagnostics::Emulation(
 void RuntimeDiagnostics::Report() const noexcept {
     for (const auto& [name, count] : counters)
         diagnostics::Write("runtime_counter", {{"reason", name}, {"count", count}});
+    diagnostics::Write("runtime_evidence_summary",
+        {{"executions", captured_executions}, {"execution_limit", 128u}, {"reads_per_execution_limit", 128u},
+            {"additional_execution_capacity", captured_executions < 128}});
 }
 }

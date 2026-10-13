@@ -1,4 +1,5 @@
 #include "sdk/reader_internal.hpp"
+#include "core/diagnostics.hpp"
 
 namespace base::sdk {
 auto Reader::Implementation::RigFor(CachedEntity& c) -> AnimationView {
@@ -55,12 +56,12 @@ auto Reader::Implementation::AnimationFor(CachedEntity& c, const Environment& en
             if (c.pose_path && i != *c.pose_path)
                 continue;
             const auto& path = native.poses[i];
-            const auto asset = Evaluate(path.asset, env.teb, c.animation_component);
+            const auto asset = Evaluate(path.asset, env.teb, c.animation_component, "pose_asset", i);
             if (!Pointer(asset)) {
                 trace.Count("pose_asset_rejected");
                 continue;
             }
-            const auto buffer = Evaluate(path.buffer, env.teb, asset);
+            const auto buffer = Evaluate(path.buffer, env.teb, asset, "pose_buffer", i);
             if (!Pointer(buffer)) {
                 trace.Count("pose_buffer_rejected");
                 continue;
@@ -128,11 +129,25 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
     };
 
     const auto rig_names = Array<RigName>(names, count);
+    const bool sample = diagnostics::Enabled() && sampled_skeletons.size() < 32 &&
+        sampled_skeletons.insert(c.animation_component).second;
+    const auto save_names = [&] {
+        if (!sample)
+            return;
+        diagnostics::Write("skeleton_evidence",
+            {{"animation", diagnostics::Hex(c.animation_component)}, {"rig", diagnostics::Hex(animation.rig)},
+                {"names", diagnostics::Hex(names)}, {"asset", diagnostics::Hex(animation.asset)},
+                {"buffer", diagnostics::Hex(animation.buffer)}, {"count", count},
+                {"name_record_size", sizeof(RigName)}, {"pose_stride", pose_stride},
+                {"names_sha256", diagnostics::Sha256(std::as_bytes(std::span(rig_names)))}});
+        diagnostics::Artifact("rig_names", 0, std::as_bytes(std::span(rig_names)));
+    };
     std::vector<skeleton::PoseKey> keys;
     keys.reserve(count);
     for (const auto& name : rig_names) {
         if (name.index >= count) {
             trace.Count("native_bone_index_out_of_bounds");
+            save_names();
             return std::nullopt;
         }
         keys.push_back({name.hash, name.index});
@@ -150,16 +165,25 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
     }
     if (!c.binding) {
         trace.Count("required_bone_names_missing");
+        save_names();
         return std::nullopt;
     }
     if (c.binding->ambiguous) {
         ++ambiguous_bones;
         trace.Count("bone_binding_ambiguous");
+        save_names();
         return std::nullopt;
     }
     const auto world = Q(c.transform_component + 0xd0);
     const auto world_transform = Read<skeleton::Matrix>(world + 0x10);
     const auto poses = Array<std::byte>(animation.buffer, count * pose_stride);
+    const auto save_pose = [&] {
+        save_names();
+        if (!sample)
+            return;
+        diagnostics::Artifact("pose_values", 0, poses);
+        diagnostics::Artifact("world_matrix", 0, std::as_bytes(std::span(&world_transform, 1)));
+    };
     const auto after = AnimationFor(c, env);
 
     if (after.rig != animation.rig || after.names != names || after.count != count ||
@@ -167,6 +191,7 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
         Q(c.transform_component + 0xd0) != world || Read<skeleton::Matrix>(world + 0x10) != world_transform ||
         Array<RigName>(names, count) != rig_names) {
         trace.Count("skeleton_graph_changed_during_read");
+        save_pose();
         return std::nullopt;
     }
     const auto confirmed = Array<std::byte>(animation.buffer, count * pose_stride);
@@ -176,6 +201,7 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
             const auto offset = *index * pose_stride;
             if (std::memcmp(poses.data() + offset, confirmed.data() + offset, sizeof(skeleton::Point))) {
                 trace.Count("pose_changed_during_read");
+                save_pose();
                 return std::nullopt;
             }
             std::memcpy(&points[*index], poses.data() + offset, sizeof(skeleton::Point));
@@ -184,9 +210,11 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
     if (!skeleton::Normalize(*c.binding, points, world_transform, nodes)) {
         ++invalid_poses;
         trace.Count("pose_normalization_rejected");
+        save_pose();
         return std::nullopt;
     }
     const skeleton::Point translation{world_transform[12], world_transform[13], world_transform[14]};
+    save_pose();
     return Actor{entity, translation, std::move(nodes)};
 }
 }

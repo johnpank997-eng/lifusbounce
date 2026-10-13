@@ -28,6 +28,24 @@ struct EmulationResult {
 
 class Emulator {
   public:
+    struct Access {
+        std::uint64_t instruction{}, address{}, value{};
+        unsigned bits{};
+        DWORD error{};
+        bool supplied{}, stack{};
+    };
+
+    struct Observer {
+        void* context{};
+        void (*read)(void*, const Access&) noexcept {};
+    };
+
+    struct State {
+        std::array<std::uint64_t, 16> registers{};
+        std::array<std::array<std::uint64_t, 2>, 16> vectors{};
+        std::uint64_t gs{}, flags{};
+    };
+
     struct Decoded {
         std::uint64_t address{};
         ZydisDecodedInstruction instruction{};
@@ -53,6 +71,12 @@ class Emulator {
     void Input(std::uint64_t address, std::span<const std::byte> bytes);
     [[nodiscard]] EmulationResult Run(const Program& code, std::size_t budget = 2048);
 
+    void Observe(Observer observer) noexcept { observer_ = observer; }
+
+    [[nodiscard]] State Snapshot() const noexcept { return {registers_, vectors_, gs_, flags_}; }
+
+    [[nodiscard]] std::span<const std::byte> StackData() const noexcept { return stack_; }
+
   private:
     struct Region {
         std::uint64_t address;
@@ -66,7 +90,9 @@ class Emulator {
     std::array<std::byte, 0x10000> stack_{};
     std::vector<Region> inputs_;
     std::uint64_t ip_{}, next_{}, gs_{}, flags_{2};
+    std::uint64_t current_{};
     unsigned address_width_{64};
+    Observer observer_{};
     [[nodiscard]] std::uint64_t Address(const ZydisDecodedOperand& operand, bool segment = true) const;
     [[nodiscard]] std::uint64_t Load(std::uint64_t address, unsigned bits) const;
     void Store(std::uint64_t address, unsigned bits, std::uint64_t value);

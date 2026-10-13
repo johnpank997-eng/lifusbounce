@@ -30,8 +30,8 @@
   </PropertyGroup>
   <ItemDefinitionGroup>
     <ClCompile>
-      <AdditionalIncludeDirectories>src;resources;driver/loader;third_party/imgui;third_party/imgui/backends;third_party/zydis/include;third_party/zydis/src;third_party/zydis/dependencies/zycore/include;third_party/zydis/dependencies/zycore/src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
-      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_WIN32_WINNT=0x0a00;ZYDIS_STATIC_BUILD;ZYCORE_STATIC_BUILD;ZYDIS_DISABLE_ENCODER;IMGUI_DISABLE_DEMO_WINDOWS;IMGUI_DISABLE_DEBUG_TOOLS;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>src;resources;third_party/miniz;driver/loader;third_party/imgui;third_party/imgui/backends;third_party/zydis/include;third_party/zydis/src;third_party/zydis/dependencies/zycore/include;third_party/zydis/dependencies/zycore/src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UNICODE;_UNICODE;WIN32_LEAN_AND_MEAN;NOMINMAX;_WIN32_WINNT=0x0a00;ZYDIS_STATIC_BUILD;ZYCORE_STATIC_BUILD;ZYDIS_DISABLE_ENCODER;IMGUI_DISABLE_DEMO_WINDOWS;IMGUI_DISABLE_DEBUG_TOOLS;MINIZ_NO_INFLATE_APIS;MINIZ_NO_ZLIB_COMPATIBLE_NAMES;MINIZ_NO_STDIO;MINIZ_NO_TIME;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpp20</LanguageStandard>
       <WarningLevel>Level4</WarningLevel>
       <ConformanceMode>true</ConformanceMode>
@@ -48,7 +48,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dwmapi.lib;user32.lib;gdi32.lib;dxgi.lib;dcomp.lib;windowscodecs.lib;winhttp.lib;dbghelp.lib;advapi32.lib;bcrypt.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dwmapi.lib;user32.lib;gdi32.lib;dxgi.lib;dcomp.lib;windowscodecs.lib;winhttp.lib;dbghelp.lib;advapi32.lib;bcrypt.lib;shell32.lib;cabinet.lib;psapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/MANIFEST:NO %(AdditionalOptions)</AdditionalOptions>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ProgramDatabaseFile>$(IntDir)$(TargetName).pdb</ProgramDatabaseFile>
@@ -58,8 +58,18 @@
   <ItemGroup>
     <ClCompile Include="src\core\diagnostics.cpp"><ObjectFileName>$(IntDir)core_diagnostics.obj</ObjectFileName></ClCompile>
     <ClInclude Include="src\core\diagnostics.hpp" />
+    <ClInclude Include="src\core\diagnostics_internal.hpp" />
+    <ClCompile Include="src\core\diagnostic_artifacts.cpp"><ObjectFileName>$(IntDir)core_diagnostic_artifacts.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\core\diagnostic_system.cpp"><ObjectFileName>$(IntDir)core_diagnostic_system.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\core\diagnostic_archive.cpp"><ObjectFileName>$(IntDir)core_diagnostic_archive.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\core\diagnostic_retention.cpp"><ObjectFileName>$(IntDir)core_diagnostic_retention.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\core\diagnostic_archive.hpp" />
+    <ClCompile Include="third_party\miniz\miniz.c"><ObjectFileName>$(IntDir)third_party_miniz.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="third_party\miniz\miniz_tdef.c"><ObjectFileName>$(IntDir)third_party_miniz_tdef.obj</ObjectFileName></ClCompile>
     <ClCompile Include="src\sdk\diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_diagnostics.obj</ObjectFileName></ClCompile>
     <ClCompile Include="src\sdk\reader_diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_reader_diagnostics.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\image_diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_image_diagnostics.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\execution_diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_execution_diagnostics.obj</ObjectFileName></ClCompile>
     <ClInclude Include="src\sdk\diagnostics.hpp" />
     <ClCompile Include="src\core\emulator.cpp"><ObjectFileName>$(IntDir)core_emulator.obj</ObjectFileName></ClCompile>
     <ClInclude Include="src\core\emulator.hpp" />

@@ -13,7 +13,9 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
             const auto& context = native.contexts[index];
             if (!trace.Run(cpu, context.code, "context_emulation_failed", index, module.address))
                 continue;
-            if (cpu.Get(context.output) != 0) {
+            const auto context_value = cpu.Get(context.output);
+            trace.Probe("thread context gate", index, teb, context_value, context_value == 0);
+            if (context_value != 0) {
                 trace.Count("context_unselected");
                 continue;
             }
@@ -22,6 +24,7 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
             if (!trace.Run(cpu, expression.code, "root_emulation_failed", index, module.address))
                 continue;
             const auto parent = cpu.Get(expression.output);
+            trace.Probe("root receiver pointer", index, teb, parent, Pointer(parent));
             if (!Pointer(parent) || !Section(Q(parent))) {
                 trace.Count("root_pointer_rejected");
                 continue;
@@ -36,6 +39,7 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                     if (!trace.Run(cpu, path.code, "manager_emulation_failed", candidate, module.address))
                         continue;
                     const auto manager = cpu.Get(path.output);
+                    trace.Probe("manager receiver pointer", candidate, parent, manager, Pointer(manager));
                     if (!Pointer(manager) || !Section(Q(manager))) {
                         trace.Count("manager_pointer_rejected");
                         continue;
@@ -52,6 +56,8 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                                 continue;
                             const auto entries = cpu.Get(extraction.array);
                             const auto count = cpu.Get(extraction.count) & 0x3fffffffull;
+                            trace.Probe("entity array bounds", recipe, entries, count,
+                                Pointer(entries) && count && count <= 0x3000);
                             if (!Pointer(entries) || !count || count > 0x3000) {
                                 trace.Count("entity_array_bounds_rejected");
                                 continue;
@@ -138,11 +144,13 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
             if (!trace.Run(cpu, expression.code, "camera_emulation_failed", index, module.address))
                 continue;
             const auto parent = cpu.Get(expression.output);
+            trace.Probe("camera receiver pointer", index, teb, parent, Pointer(parent));
             if (!Pointer(parent) || !Section(Q(parent))) {
                 trace.Count("camera_parent_rejected");
                 continue;
             }
             const auto camera = Q(parent + 0xf00);
+            trace.Probe("camera object pointer", index, parent + 0xf00, camera, Pointer(camera));
             if (!Pointer(camera)) {
                 trace.Count("camera_pointer_rejected");
                 continue;

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <exception>
 #include <limits>
+#include <new>
 #include <system_error>
 #include <vector>
 #include <utility>
@@ -115,9 +116,14 @@ void Session::Implementation::SetEnabled(bool enabled) {
         try {
             Scan(stop);
         } catch (const std::system_error& error) {
+            diagnostics::Exception("session scan", error);
             Publish({error.what(), static_cast<DWORD>(error.code().value())}, stop);
-        } catch (const std::exception&) {
-            Publish({"locator scan failed", ERROR_NOT_ENOUGH_MEMORY}, stop);
+        } catch (const std::bad_alloc& error) {
+            diagnostics::Exception("session scan", error);
+            Publish({"not enough memory for the locator scan", ERROR_NOT_ENOUGH_MEMORY}, stop);
+        } catch (const std::exception& error) {
+            diagnostics::Exception("session scan", error);
+            Publish({"locator scan threw an exception; see diagnostic log", ERROR_INVALID_DATA}, stop);
         }
         const auto final_status = Status();
         diagnostics::Write("scan_finished",
@@ -248,6 +254,11 @@ void Session::Implementation::Scan(std::stop_token stop) {
             const auto got = process.ReadBytes(
                 module->address + header.BaseOfCode + offset, std::span(code).subspan(offset, size));
             if (!got.Complete()) {
+                diagnostics::Write("native_code_read_error",
+                    {{"rva", diagnostics::Hex(header.BaseOfCode + offset)}, {"requested", size},
+                        {"transferred", got.transferred}, {"win32", got.error}});
+                diagnostics::Artifact("partial_game_code", header.BaseOfCode,
+                    std::span(code).first(offset + got.transferred), stop);
                 Publish({"cannot read native locator code", got.error}, stop);
                 return;
             }
@@ -264,17 +275,31 @@ void Session::Implementation::Scan(std::stop_token stop) {
                 {"function_records", functions.size()}, {"code_rva", header.BaseOfCode},
                 {"code_size", header.SizeOfCode}, {"functions_rva", directory.VirtualAddress},
                 {"functions_size", directory.Size}});
-        native = locators::Discover(
-            code, header.BaseOfCode, module->address, functions, stop,
-            [&](std::size_t completed, std::size_t total) {
-                const float progress = 0.60f +
-                    0.30f * static_cast<float>(completed) /
-                        static_cast<float>(std::max<std::size_t>(total, 1));
-                Publish({"discovering native paths", ERROR_SUCCESS, target_pid_, {}, progress}, stop);
-            },
-            [&](std::string_view role, const locators::FunctionRecord& function,
-                std::span<const std::byte> bytes, const Emulator::Program* decoded,
-                std::size_t accepted) { discovery.Observe(role, function, bytes, decoded, accepted); });
+        ReportImage(process, *module, *nt, code, functions, code_hash, stop);
+        if (stop.stop_requested())
+            return;
+        try {
+            native = locators::Discover(
+                code, header.BaseOfCode, module->address, functions, stop,
+                [&](std::size_t completed, std::size_t total) {
+                    const float progress = 0.60f +
+                        0.30f * static_cast<float>(completed) /
+                            static_cast<float>(std::max<std::size_t>(total, 1));
+                    Publish({"discovering native paths", ERROR_SUCCESS, target_pid_, {}, progress}, stop);
+                },
+                [&](std::string_view role, const locators::FunctionRecord& function,
+                    std::span<const std::byte> bytes, const Emulator::Program* decoded,
+                    std::size_t accepted) { discovery.Observe(role, function, bytes, decoded, accepted); },
+                [&](std::string_view stage, std::size_t index, const locators::FunctionRecord& function) {
+                    discovery.Enter(stage, index, function);
+                },
+                [&](std::string_view rule, std::uint64_t instruction, std::uint64_t observed) {
+                    discovery.Validation(rule, instruction, observed);
+                });
+        } catch (const std::exception& error) {
+            discovery.Failure(error);
+            throw;
+        }
         discovery.Report();
         diagnostics::Phase("selected character discovery", 0.90f);
         if (!stop.stop_requested() && nt->FileHeader.NumberOfSections &&

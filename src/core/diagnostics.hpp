@@ -2,8 +2,10 @@
 #include <windows.h>
 #include <concepts>
 #include <cstdint>
+#include <exception>
 #include <initializer_list>
 #include <span>
+#include <stop_token>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -31,7 +33,12 @@ struct Field {
     Field(std::string_view key, T number) : name(key), value(static_cast<double>(number)) {}
 };
 
-bool Initialize(std::wstring_view directory = {}) noexcept;
+struct Limits {
+    std::uint64_t records = 8 * 1024 * 1024;
+    std::uint64_t evidence = 1024ull * 1024 * 1024;
+};
+
+bool Initialize(std::wstring_view directory = {}, Limits limits = {}) noexcept;
 void Shutdown() noexcept;
 bool Enabled() noexcept;
 DWORD Error() noexcept;
@@ -41,4 +48,8 @@ void Write(std::string_view event, std::initializer_list<Field> fields = {}) noe
 void Phase(std::string_view name, float progress = 0.0f) noexcept;
 std::string Hex(std::uint64_t value);
 std::string Sha256(std::span<const std::byte> bytes) noexcept;
+bool Artifact(std::string_view name, std::uint64_t rva, std::span<const std::byte> bytes,
+    std::stop_token stop = {}, std::string_view hash = {}) noexcept;
+void MemoryStatus(std::string_view reason) noexcept;
+void Exception(std::string_view stage, const std::exception& error) noexcept;
 }

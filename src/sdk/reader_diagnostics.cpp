@@ -3,6 +3,8 @@
 
 namespace base::sdk {
 void Reader::ReportDiagnostics(bool layouts) const noexcept {
+    if (!diagnostics::Enabled())
+        return;
     try {
         const auto& state = *impl_;
         state.trace.Report();
@@ -53,12 +55,33 @@ void Reader::ReportDiagnostics(bool layouts) const noexcept {
                 diagnostics::Write("transport_error_count", {{"win32", error}, {"count", count}});
         if (!layouts)
             return;
+        if (state.selected) {
+            const auto& selected = *state.selected;
+            diagnostics::Write("verified_environment",
+                {{"teb", diagnostics::Hex(selected.teb)}, {"tls", diagnostics::Hex(selected.tls)},
+                    {"parent", diagnostics::Hex(selected.parent)},
+                    {"manager", diagnostics::Hex(selected.manager)},
+                    {"array", diagnostics::Hex(selected.array)},
+                    {"camera", diagnostics::Hex(selected.camera)}, {"count", selected.count}});
+            if (Pointer(selected.camera)) {
+                DWORD error{};
+                if (const auto matrix = state.process.Read<skeleton::Matrix>(selected.camera + 0x2c0, &error))
+                    diagnostics::Artifact("camera_matrix", 0, std::as_bytes(std::span(&*matrix, 1)));
+                else
+                    diagnostics::Write(
+                        "diagnostic_structure_read_failed", {{"role", "camera matrix"}, {"win32", error}});
+            }
+        }
         unsigned examples{};
         for (const auto& [entity, cached] : state.cache) {
             if (!cached.animation_component || !cached.transform_component || examples++ >= 8)
                 continue;
             diagnostics::Write("entity_layout",
-                {{"sample", examples - 1},
+                {{"sample", examples - 1}, {"entity", diagnostics::Hex(entity)},
+                    {"component_list", diagnostics::Hex(cached.list)},
+                    {"animation", diagnostics::Hex(cached.animation_component)},
+                    {"transform", diagnostics::Hex(cached.transform_component)},
+                    {"rig", diagnostics::Hex(cached.rig)}, {"rig_names", diagnostics::Hex(cached.names)},
                     {"vtable_rva",
                         cached.vtable >= state.module.address &&
                                 cached.vtable - state.module.address < state.module.size
@@ -84,6 +107,21 @@ void Reader::ReportDiagnostics(bool layouts) const noexcept {
                             ? diagnostics::Hex(table - state.module.address)
                             : "outside image"},
                     {"extent", extent == state.extents.end() ? 0ull : extent->second}});
+            if (state.metadata && Pointer(table)) {
+                DWORD error{};
+                const auto info = state.process.Read<Address>(table + state.metadata->table_field, &error);
+                if (info && Pointer(*info)) {
+                    const auto size = state.process.Read<Address>(*info + 0x24);
+                    const auto low = state.process.Read<std::uint16_t>(*info + 0x40);
+                    const auto high = state.process.Read<std::uint16_t>(*info + 0x42);
+                    diagnostics::Write("type_relationship",
+                        {{"vtable", diagnostics::Hex(table)}, {"metadata", diagnostics::Hex(*info)},
+                            {"extent", size.value_or(0)},
+                            {"subtype_lower", low ? static_cast<int>(*low) : -1},
+                            {"subtype_upper", high ? static_cast<int>(*high) : -1},
+                            {"interval_read_complete", low.has_value() && high.has_value()}});
+                }
+            }
         }
     } catch (...) {
     }

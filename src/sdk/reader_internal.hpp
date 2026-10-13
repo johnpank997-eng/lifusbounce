@@ -137,6 +137,7 @@ struct Reader::Implementation {
     };
 
     std::unordered_map<Address, CachedEntity> cache;
+    std::set<Address> sampled_skeletons;
 
     struct Actor {
         Address entity;
@@ -175,7 +176,8 @@ struct Reader::Implementation {
 
     Address Q(Address at);
 
-    Address Evaluate(const locators::PointerDescriptor& path, Address teb, Address object);
+    Address Evaluate(const locators::PointerDescriptor& path, Address teb, Address object,
+        std::string_view stage = {}, std::size_t index = 0);
 
     struct AnimationView {
         Address asset{}, buffer{}, rig{}, names{};

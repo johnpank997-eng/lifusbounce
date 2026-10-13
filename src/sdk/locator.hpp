@@ -62,7 +62,9 @@ struct MetadataDescriptor {
 };
 
 [[nodiscard]] std::optional<MetadataDescriptor> Metadata(const Emulator::Program& code);
-[[nodiscard]] std::optional<Expression> Root(const Emulator::Program& code);
+using ValidationObserver = std::function<void(std::string_view, std::uint64_t, std::uint64_t)>;
+[[nodiscard]] std::optional<Expression> Root(
+    const Emulator::Program& code, const ValidationObserver& validation = {});
 [[nodiscard]] std::optional<Expression> Camera(const Emulator::Program& code);
 [[nodiscard]] std::vector<Expression> Manager(const Emulator::Program& code);
 
@@ -123,7 +125,8 @@ struct AffiliationDescriptor {
 };
 
 [[nodiscard]] std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code);
-[[nodiscard]] std::vector<PoseDescriptor> Poses(const Emulator::Program& code);
+[[nodiscard]] std::vector<PoseDescriptor> Poses(
+    const Emulator::Program& code, const ValidationObserver& validation = {});
 
 struct NativeDescriptor {
     std::vector<FunctionRecord> functions;
@@ -148,10 +151,12 @@ struct NativeDescriptor {
 
 using DiscoveryObserver = std::function<void(std::string_view, const FunctionRecord&,
     std::span<const std::byte>, const Emulator::Program*, std::size_t)>;
+using ScanObserver = std::function<void(std::string_view, std::size_t, const FunctionRecord&)>;
 
 [[nodiscard]] NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rva,
     std::uint64_t module, std::span<const FunctionRecord> functions, std::stop_token stop,
     const std::function<void(std::size_t, std::size_t)>& progress = {},
-    const DiscoveryObserver& observer = {});
+    const DiscoveryObserver& observer = {}, const ScanObserver& checkpoint = {},
+    const ValidationObserver& validation = {});
 
 }
