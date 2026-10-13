@@ -1089,7 +1089,7 @@ std::optional<MetadataDescriptor> Metadata(const Emulator::Program& code) {
             }
         }
         const auto table = b.operands[1].mem.disp.value;
-        if (field < 0 || field > 0x1000 || table < 8 || table > 0x1000 || output == ZYDIS_REGISTER_NONE)
+        if (field < 0 || field > 0x1000 || table < 0 || table > 0x1000 || output == ZYDIS_REGISTER_NONE)
             continue;
         auto expression = Slice(code, end, output);
         if (!expression || expression->inputs != 2u)
@@ -1120,7 +1120,22 @@ std::optional<Expression> Root(const Emulator::Program& code) {
             d.operands[1].mem.base == ZYDIS_REGISTER_RSP || d.operands[1].mem.disp.value <= 0)
             continue;
         auto result = Slice(code, j, d.operands[1].mem.base);
-        if (result && !result->inputs)
+        if (!result || result->inputs || result->code.instructions.empty())
+            continue;
+        const auto& tail = result->code.instructions.back();
+        const bool tls = tail.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+            tail.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY && tail.operands[1].mem.scale == 8 &&
+            tail.operands[1].mem.index != ZYDIS_REGISTER_NONE &&
+            std::any_of(
+                result->code.instructions.begin(), result->code.instructions.end(), [&](const auto& load) {
+                    return load.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                        load.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                        load.operands[0].reg.value == tail.operands[1].mem.base &&
+                        load.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                        load.operands[1].mem.segment == ZYDIS_REGISTER_GS &&
+                        load.operands[1].mem.disp.value == 0x58;
+                });
+        if (!tls)
             return result;
     }
     return std::nullopt;
@@ -1163,8 +1178,8 @@ std::vector<RigDescriptor> RigLookups(const Emulator::Program& code) {
         const auto& b = count.operands[1];
         if (table.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
             count.instruction.mnemonic != ZYDIS_MNEMONIC_MOV || a.type != ZYDIS_OPERAND_TYPE_MEMORY ||
-            b.type != ZYDIS_OPERAND_TYPE_MEMORY || a.size != 64 || b.size != 32 || a.mem.base != b.mem.base ||
-            !Dependency(a.mem.base) || a.mem.base == ZYDIS_REGISTER_RSP ||
+            b.type != ZYDIS_OPERAND_TYPE_MEMORY || a.size != 64 || (b.size != 32 && b.size != 64) ||
+            a.mem.base != b.mem.base || !Dependency(a.mem.base) || a.mem.base == ZYDIS_REGISTER_RSP ||
             a.mem.index != ZYDIS_REGISTER_NONE || b.mem.index != ZYDIS_REGISTER_NONE ||
             a.mem.disp.value <= 0 || a.mem.disp.value >= 0x10000 ||
             b.mem.disp.value != a.mem.disp.value + 8 || shift.instruction.mnemonic != ZYDIS_MNEMONIC_SHL ||
@@ -2260,7 +2275,7 @@ static std::optional<AffiliationDescriptor> Affiliation(
 
 NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rva, std::uint64_t module,
     std::span<const FunctionRecord> functions, std::stop_token stop,
-    const std::function<void(std::size_t, std::size_t)>& progress) {
+    const std::function<void(std::size_t, std::size_t)>& progress, const DiscoveryObserver& observer) {
     NativeDescriptor result;
     result.functions.assign(functions.begin(), functions.end());
     std::map<std::vector<std::uint64_t>, MetadataDescriptor> metadata;
@@ -2296,18 +2311,33 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
             gs |= a == 0x65 && (b == 0x48 || b == 0x4c) && c == 0x8b;
             zero |= j < 96 && a == 0x0f && b == 0x57 && ((c >> 3) & 7) == (c & 7);
         }
+        if (!gs && bytes.size() < 0x1000)
+            for (std::size_t j = prefix.size() - 2; j + 3 <= bytes.size(); ++j)
+                gs |= bytes[j] == std::byte{0x65} &&
+                    (bytes[j + 1] == std::byte{0x48} || bytes[j + 1] == std::byte{0x4c}) &&
+                    bytes[j + 2] == std::byte{0x8b};
         const bool root_anchor =
             bytes.size() < 0x4000 && contains(bytes, 0x14f8b589) && contains(bytes, 0xc350);
-        if (bytes.size() < 0x4000 && contains(bytes, 0x1d2e4b8f))
-            if (auto decoded = Emulator::Decode(bytes, module + f.begin, true))
+        if (bytes.size() < 0x4000 && contains(bytes, 0x1d2e4b8f)) {
+            const auto before = result.health.size();
+            auto decoded = Emulator::Decode(bytes, module + f.begin, true);
+            if (decoded)
                 if (auto value = Health(*decoded, code, code_rva, module, functions))
                     result.health.push_back(std::move(*value));
-        if (bytes.size() < 0x10000 && contains(bytes, 0xa9cefd4a))
-            if (auto decoded = Emulator::Decode(bytes, module + f.begin, true)) {
+            if (observer)
+                observer("health", f, bytes, decoded ? &*decoded : nullptr, result.health.size() - before);
+        }
+        if (bytes.size() < 0x10000 && contains(bytes, 0xa9cefd4a)) {
+            const auto before = result.rigs.size();
+            auto decoded = Emulator::Decode(bytes, module + f.begin, true);
+            if (decoded) {
                 auto values = RigLookups(*decoded);
                 result.rigs.insert(result.rigs.end(), std::make_move_iterator(values.begin()),
                     std::make_move_iterator(values.end()));
             }
+            if (observer)
+                observer("rig", f, bytes, decoded ? &*decoded : nullptr, result.rigs.size() - before);
+        }
         const bool camera_anchor = bytes.size() < 0x2000 && gs && zero;
         const bool manager_anchor = bytes.size() < 0x1000 && gs;
         if (bytes.size() < 0x4000)
@@ -2342,12 +2372,17 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                     array_anchor = true;
                     break;
                 }
-        if (array_anchor)
-            if (auto decoded = Emulator::Decode(bytes, module + f.begin, true)) {
+        if (array_anchor) {
+            const auto before = result.arrays.size();
+            auto decoded = Emulator::Decode(bytes, module + f.begin, true);
+            if (decoded) {
                 auto values = Arrays(*decoded);
                 result.arrays.insert(result.arrays.end(), std::make_move_iterator(values.begin()),
                     std::make_move_iterator(values.end()));
             }
+            if (observer)
+                observer("array", f, bytes, decoded ? &*decoded : nullptr, result.arrays.size() - before);
+        }
         bool pose_anchor = false;
         if (bytes.size() > 0x1000 && bytes.size() < 0x10000)
             for (std::size_t j = 0; j + 3 <= bytes.size(); ++j)
@@ -2356,13 +2391,20 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                     pose_anchor = true;
                     break;
                 }
-        if (pose_anchor)
-            if (auto decoded = Emulator::Decode(bytes, module + f.begin, true)) {
+        if (pose_anchor) {
+            const auto before = result.poses.size();
+            auto decoded = Emulator::Decode(bytes, module + f.begin, true);
+            if (decoded) {
                 auto values = Poses(*decoded);
                 result.poses.insert(result.poses.end(), std::make_move_iterator(values.begin()),
                     std::make_move_iterator(values.end()));
             }
+            if (observer)
+                observer("pose", f, bytes, decoded ? &*decoded : nullptr, result.poses.size() - before);
+        }
         if (root_anchor || camera_anchor || manager_anchor) {
+            const auto roots_before = result.roots.size(), cameras_before = result.cameras.size(),
+                       managers_before = result.managers.size();
             auto decoded = Emulator::Decode(bytes, module + f.begin, true);
             if (decoded && root_anchor)
                 if (auto value = Root(*decoded)) {
@@ -2479,12 +2521,26 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                 result.managers.insert(result.managers.end(), std::make_move_iterator(values.begin()),
                     std::make_move_iterator(values.end()));
             }
+            if (observer) {
+                if (root_anchor)
+                    observer("root_context", f, bytes, decoded ? &*decoded : nullptr,
+                        result.roots.size() - roots_before);
+                if (camera_anchor)
+                    observer("camera", f, bytes, decoded ? &*decoded : nullptr,
+                        result.cameras.size() - cameras_before);
+                if (manager_anchor)
+                    observer("manager", f, bytes, decoded ? &*decoded : nullptr,
+                        result.managers.size() - managers_before);
+            }
         }
         if (!object)
             continue;
         auto decoded =
             Emulator::Decode(prefix.first(std::min<std::size_t>(prefix.size(), 128)), module + f.begin, true);
         auto candidate = decoded ? locators::Metadata(*decoded) : std::nullopt;
+        if (observer)
+            observer("metadata", f, prefix.first(std::min<std::size_t>(prefix.size(), 128)),
+                decoded ? &*decoded : nullptr, candidate ? 1 : 0);
         if (!candidate)
             continue;
         std::vector<std::uint64_t> key{candidate->table_field, candidate->hash_field};
@@ -2630,12 +2686,18 @@ std::vector<Expression> Manager(const Emulator::Program& code) {
         return result;
     for (std::size_t j = 0; j < code.instructions.size(); ++j) {
         const auto& d = code.instructions[j];
-        if (d.instruction.mnemonic != ZYDIS_MNEMONIC_CMP)
+        const bool compare = d.instruction.mnemonic == ZYDIS_MNEMONIC_CMP;
+        const bool decoded_null = j + 1 < code.instructions.size() &&
+            (d.instruction.mnemonic == ZYDIS_MNEMONIC_ADD || d.instruction.mnemonic == ZYDIS_MNEMONIC_SUB ||
+                d.instruction.mnemonic == ZYDIS_MNEMONIC_XOR) &&
+            (code.instructions[j + 1].instruction.mnemonic == ZYDIS_MNEMONIC_JZ ||
+                code.instructions[j + 1].instruction.mnemonic == ZYDIS_MNEMONIC_JNZ);
+        if (!compare && !decoded_null)
             continue;
-        for (unsigned operand = 0; operand < 2; ++operand) {
+        for (unsigned operand = 0; operand < (compare ? 2u : 1u); ++operand) {
             if (d.operands[operand].type != ZYDIS_OPERAND_TYPE_REGISTER || d.operands[operand].size != 64)
                 continue;
-            auto candidate = Slice(code, j, d.operands[operand].reg.value);
+            auto candidate = Slice(code, j + (compare ? 0 : 1), d.operands[operand].reg.value);
             if (!candidate || candidate->inputs != 2u)
                 continue;
             const bool seed = std::any_of(

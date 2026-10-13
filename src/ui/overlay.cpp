@@ -1,4 +1,5 @@
 #include "ui/overlay_internal.hpp"
+#include "core/diagnostics.hpp"
 #include "ui/overlay.hpp"
 #include "sdk/session.hpp"
 #include "sdk/aim.hpp"
@@ -192,7 +193,9 @@ int RunOverlay(HINSTANCE instance) {
             input.game = target.window;
         }
         auto status = game.Status();
-        input.UpdateLoading(status.progress);
+        input.UpdateLoading(status.progress, status.running && !status.waiting);
+        if (!status.running || !status.frame)
+            hud_text = status.message;
         const bool active = input.ForegroundGame();
         if (!active || !input.menu || input.loading)
             aim_key.Cancel();
@@ -422,6 +425,9 @@ int RunOverlay(HINSTANCE instance) {
                         break;
                     case DebugAction::quit:
                         done = true;
+                        break;
+                    case DebugAction::logs:
+                        diagnostics::OpenFolder();
                         break;
                     case DebugAction::none:
                         break;

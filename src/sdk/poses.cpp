@@ -11,18 +11,22 @@ auto Reader::Implementation::RigFor(CachedEntity& c) -> AnimationView {
             const auto& path = native.rigs[i];
             cpu.Reset();
             cpu.Set(ZYDIS_REGISTER_RCX, c.animation_component);
-            if (!cpu.Run(path.owner.code).Complete())
+            if (!trace.Run(cpu, path.owner.code, "rig_emulation_failed", i, module.address))
                 continue;
             const auto rig = cpu.Get(path.owner.output);
-            if (Hash(rig) != 0x4da91c62u)
+            if (Hash(rig) != 0x4da91c62u) {
+                trace.Count("rig_type_rejected");
                 continue;
+            }
             const auto names = Q(rig + path.names_field);
             const auto count = static_cast<std::uint32_t>(
                 (path.count_width == 64 ? Q(rig + path.names_field + 8)
                                         : Read<std::uint32_t>(rig + path.names_field + 8)) &
                 0x3fffffffu);
-            if (!count || count > 4096 || !Pointer(names))
+            if (!count || count > 4096 || !Pointer(names)) {
+                trace.Count("rig_names_or_count_rejected");
                 continue;
+            }
             if (matched && (value.rig != rig || value.names != names || value.count != count))
                 throw ReadFailure{ERROR_DUP_NAME};
             value.rig = rig;
@@ -34,8 +38,10 @@ auto Reader::Implementation::RigFor(CachedEntity& c) -> AnimationView {
             if (failure.error == ERROR_DUP_NAME)
                 throw;
         }
-    if (!matched)
+    if (!matched) {
+        trace.Count("rig_not_resolved");
         throw ReadFailure{ERROR_NOT_READY};
+    }
     c.rig_path = matched;
     return value;
 }
@@ -50,11 +56,15 @@ auto Reader::Implementation::AnimationFor(CachedEntity& c, const Environment& en
                 continue;
             const auto& path = native.poses[i];
             const auto asset = Evaluate(path.asset, env.teb, c.animation_component);
-            if (!Pointer(asset))
+            if (!Pointer(asset)) {
+                trace.Count("pose_asset_rejected");
                 continue;
+            }
             const auto buffer = Evaluate(path.buffer, env.teb, asset);
-            if (!Pointer(buffer))
+            if (!Pointer(buffer)) {
+                trace.Count("pose_buffer_rejected");
                 continue;
+            }
             if (matched && (result.asset != asset || result.buffer != buffer))
                 throw ReadFailure{ERROR_DUP_NAME};
             result.asset = asset;
@@ -65,8 +75,10 @@ auto Reader::Implementation::AnimationFor(CachedEntity& c, const Environment& en
             if (failure.error == ERROR_DUP_NAME)
                 throw;
         }
-    if (!matched)
+    if (!matched) {
+        trace.Count("pose_not_resolved");
         throw ReadFailure{ERROR_NOT_READY};
+    }
     c.pose_path = matched;
     emulation_error.reset();
     return result;
@@ -119,8 +131,10 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
     std::vector<skeleton::PoseKey> keys;
     keys.reserve(count);
     for (const auto& name : rig_names) {
-        if (name.index >= count)
+        if (name.index >= count) {
+            trace.Count("native_bone_index_out_of_bounds");
             return std::nullopt;
+        }
         keys.push_back({name.hash, name.index});
     }
     const bool rig_changed = c.rig != animation.rig || c.names != names || c.pose_count != count ||
@@ -134,10 +148,13 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
         c.keys = std::move(keys);
         c.binding = skeleton::Bind(c.keys);
     }
-    if (!c.binding)
+    if (!c.binding) {
+        trace.Count("required_bone_names_missing");
         return std::nullopt;
+    }
     if (c.binding->ambiguous) {
         ++ambiguous_bones;
+        trace.Count("bone_binding_ambiguous");
         return std::nullopt;
     }
     const auto world = Q(c.transform_component + 0xd0);
@@ -148,20 +165,25 @@ auto Reader::Implementation::CaptureSkeleton(Address entity, CachedEntity& c, co
     if (after.rig != animation.rig || after.names != names || after.count != count ||
         after.asset != animation.asset || after.buffer != animation.buffer ||
         Q(c.transform_component + 0xd0) != world || Read<skeleton::Matrix>(world + 0x10) != world_transform ||
-        Array<RigName>(names, count) != rig_names)
+        Array<RigName>(names, count) != rig_names) {
+        trace.Count("skeleton_graph_changed_during_read");
         return std::nullopt;
+    }
     const auto confirmed = Array<std::byte>(animation.buffer, count * pose_stride);
     std::vector<skeleton::Point> points(count);
     for (const auto index : c.binding->indices)
         if (index) {
             const auto offset = *index * pose_stride;
-            if (std::memcmp(poses.data() + offset, confirmed.data() + offset, sizeof(skeleton::Point)))
+            if (std::memcmp(poses.data() + offset, confirmed.data() + offset, sizeof(skeleton::Point))) {
+                trace.Count("pose_changed_during_read");
                 return std::nullopt;
+            }
             std::memcpy(&points[*index], poses.data() + offset, sizeof(skeleton::Point));
         }
     skeleton::Nodes nodes{};
     if (!skeleton::Normalize(*c.binding, points, world_transform, nodes)) {
         ++invalid_poses;
+        trace.Count("pose_normalization_rejected");
         return std::nullopt;
     }
     const skeleton::Point translation{world_transform[12], world_transform[13], world_transform[14]};

@@ -7,11 +7,15 @@ auto Reader::Implementation::TypeInfo(Address object, Address* out_vtable) -> Ad
     const auto vtable = Q(object);
     if (out_vtable)
         *out_vtable = vtable;
-    if (!Section(vtable))
+    if (!Section(vtable)) {
+        trace.Count("object_vtable_outside_sections");
         throw ReadFailure{ERROR_INVALID_DATA};
+    }
     const auto info = Q(vtable + metadata->table_field);
-    if (!Section(info))
+    if (!Section(info)) {
+        trace.Count("metadata_pointer_outside_sections");
         throw ReadFailure{ERROR_INVALID_DATA};
+    }
     return info;
 }
 
@@ -23,8 +27,10 @@ auto Reader::Implementation::Hash(Address object) -> std::uint32_t {
     cpu.Reset();
     cpu.Set(ZYDIS_REGISTER_RCX, object);
     const auto result = cpu.Run(metadata->decode.code);
-    if (!result.Complete())
+    if (!result.Complete()) {
+        trace.Emulation("metadata_decode_failed", 0, result, module.address);
         throw ReadFailure{ERROR_NOT_SUPPORTED};
+    }
     const auto value = static_cast<std::uint32_t>(cpu.Get(metadata->decode.output));
     hashes.emplace(vtable, value);
     return value;
@@ -39,8 +45,10 @@ auto Reader::Implementation::Extent(Address object, Address limit) -> Address {
         value = Q(TypeInfo(object) + 0x24);
         extents.emplace(vtable, value);
     }
-    if (!value || value > limit)
+    if (!value || value > limit) {
+        trace.Count("metadata_extent_rejected");
         throw ReadFailure{ERROR_INVALID_DATA};
+    }
     return value;
 }
 }

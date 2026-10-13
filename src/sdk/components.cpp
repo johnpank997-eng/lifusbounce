@@ -2,6 +2,7 @@
 
 namespace base::sdk {
 auto Reader::Implementation::Discover(Address entity) -> CachedEntity {
+    trace.Count("component_scans");
     CachedEntity c{};
     c.vtable = Q(entity);
     c.expires = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000 + (entity >> 4) % 500);
@@ -71,8 +72,10 @@ auto Reader::Implementation::Discover(Address entity) -> CachedEntity {
                 throw;
         }
     }
-    if (!c.animation_component || !c.transform_component)
+    if (!c.animation_component || !c.transform_component) {
+        trace.Count("required_components_not_verified");
         c.expires = std::chrono::steady_clock::now() + std::chrono::milliseconds(100 + (entity >> 4) % 25);
+    }
     c.next_components = std::chrono::steady_clock::now() + std::chrono::milliseconds(100);
     return c;
 }

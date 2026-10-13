@@ -48,7 +48,7 @@
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
-      <AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dwmapi.lib;user32.lib;gdi32.lib;dxgi.lib;dcomp.lib;windowscodecs.lib;winhttp.lib;dbghelp.lib;advapi32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dwmapi.lib;user32.lib;gdi32.lib;dxgi.lib;dcomp.lib;windowscodecs.lib;winhttp.lib;dbghelp.lib;advapi32.lib;bcrypt.lib;shell32.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <AdditionalOptions>/MANIFEST:NO %(AdditionalOptions)</AdditionalOptions>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <ProgramDatabaseFile>$(IntDir)$(TargetName).pdb</ProgramDatabaseFile>
@@ -56,6 +56,11 @@
     <ResourceCompile><AdditionalIncludeDirectories>resources;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories></ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="src\core\diagnostics.cpp"><ObjectFileName>$(IntDir)core_diagnostics.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\core\diagnostics.hpp" />
+    <ClCompile Include="src\sdk\diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_diagnostics.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\reader_diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_reader_diagnostics.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\sdk\diagnostics.hpp" />
     <ClCompile Include="src\core\emulator.cpp"><ObjectFileName>$(IntDir)core_emulator.obj</ObjectFileName></ClCompile>
     <ClInclude Include="src\core\emulator.hpp" />
     <ClCompile Include="src\core\disasm.cpp"><ObjectFileName>$(IntDir)core_disasm.obj</ObjectFileName></ClCompile>

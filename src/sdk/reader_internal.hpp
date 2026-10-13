@@ -4,6 +4,7 @@
 #include "sdk/operator_definitions.hpp"
 #include "sdk/operator_animation.hpp"
 #include "sdk/equipment.hpp"
+#include "sdk/diagnostics.hpp"
 #include "core/emulator.hpp"
 #include <algorithm>
 #include <cmath>
@@ -49,6 +50,8 @@ struct Reader::Implementation {
     std::optional<EmulationResult> emulation_error;
     std::string message = "resolving live data";
     DWORD last_error = ERROR_SUCCESS;
+    RuntimeDiagnostics trace;
+    mutable std::array<std::optional<std::size_t>, 4> reported_paths;
     std::uint32_t tls_index{};
     std::vector<std::pair<Address, Address>> sections;
     std::optional<Environment> selected;
@@ -142,23 +145,31 @@ struct Reader::Implementation {
     };
 
     template <class T> T Read(Address at) {
-        if (!Pointer(at) || sizeof(T) > 0x800000000000ull - at)
+        if (!Pointer(at) || sizeof(T) > 0x800000000000ull - at) {
+            trace.Error("invalid_read_address", ERROR_INVALID_ADDRESS);
             throw ReadFailure{ERROR_INVALID_ADDRESS};
+        }
         DWORD error = ERROR_SUCCESS;
         const auto value = process.Read<T>(static_cast<std::uintptr_t>(at), &error);
-        if (!value)
+        if (!value) {
+            trace.Error("memory_read_failed", error);
             throw ReadFailure{error};
+        }
         return *value;
     }
 
     template <class T> std::vector<T> Array(Address at, std::size_t count) {
-        if (!count || count > 0x10000 || !Pointer(at) || count * sizeof(T) > 0x800000000000ull - at)
+        if (!count || count > 0x10000 || !Pointer(at) || count * sizeof(T) > 0x800000000000ull - at) {
+            trace.Error("invalid_array_bounds", ERROR_INVALID_DATA);
             throw ReadFailure{ERROR_INVALID_DATA};
+        }
         std::vector<T> result(count);
         const auto got =
             process.ReadBytes(static_cast<std::uintptr_t>(at), std::as_writable_bytes(std::span(result)));
-        if (!got.Complete())
+        if (!got.Complete()) {
+            trace.Error("memory_array_read_failed", got.error);
             throw ReadFailure{got.error};
+        }
         return result;
     }
 

@@ -16,6 +16,7 @@ struct SessionStatus {
     std::shared_ptr<const Snapshot> frame;
     float progress = 0.0f;
     bool running = false;
+    bool waiting = false;
 };
 
 class Session {

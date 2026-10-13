@@ -16,7 +16,7 @@ float Animate(const char* name, float target, float speed = 14.0f);
 bool ToggleRow(const char* label, bool* value, float* color);
 void CustomSlider(const char* label, float* value, float v_min, float v_max, float step = 0.1f);
 bool ChoiceRow(const char* label, const char* selected, bool dropdown = true);
-enum class DebugAction { none, reload, quit };
+enum class DebugAction { none, reload, logs, quit };
 DebugAction DebugControls();
 bool MenuFrame(ImVec2 position, int& selected);
 void DrawPlayerStatus(const char* text);
@@ -44,7 +44,7 @@ struct Interaction {
 
     void BeginLoading();
 
-    void UpdateLoading(float progress);
+    void UpdateLoading(float progress, bool running = true);
 
     void ReleaseInput();
 

@@ -122,6 +122,7 @@ std::vector<ProcessInfo> Processes(DWORD& error) {
 
 DWORD Memory::Attach(DWORD pid) noexcept {
     Detach();
+    statistics_ = {};
     auto drv = OpenDriver();
     if (!drv)
         return GetLastError();
@@ -131,21 +132,37 @@ DWORD Memory::Attach(DWORD pid) noexcept {
 }
 
 ReadResult Memory::ReadBytes(std::uintptr_t address, std::span<std::byte> output) const noexcept {
+    ++statistics_.calls;
+    statistics_.requested += output.size();
+    const auto finish = [&](ReadResult result) {
+        statistics_.transferred += result.transferred;
+        if (result.error) {
+            ++statistics_.failures;
+            statistics_.last_error = result.error;
+            for (auto& [error, count] : statistics_.errors)
+                if (!count || error == result.error) {
+                    error = result.error;
+                    ++count;
+                    break;
+                }
+        }
+        return result;
+    };
     if (!driver_)
-        return {0, ERROR_INVALID_HANDLE};
+        return finish({0, ERROR_INVALID_HANDLE});
     if (output.empty())
         return {};
     if (address > std::numeric_limits<std::uintptr_t>::max() - (output.size() - 1))
-        return {0, ERROR_ARITHMETIC_OVERFLOW};
+        return finish({0, ERROR_ARITHMETIC_OVERFLOW});
     std::size_t done = 0;
     while (done < output.size()) {
         const auto n = std::min(max_chunk, output.size() - done);
         const auto err = DrvRead(driver_.Get(), pid_, address + done, output.data() + done, n);
         if (err)
-            return {done, err};
+            return finish({done, err});
         done += n;
     }
-    return {done, ERROR_SUCCESS};
+    return finish({done, ERROR_SUCCESS});
 }
 
 std::vector<ModuleInfo> Memory::Modules(DWORD& error) const {

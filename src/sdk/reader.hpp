@@ -20,6 +20,7 @@ class Reader {
     [[nodiscard]] const std::string& Status() const noexcept;
     [[nodiscard]] DWORD Error() const noexcept;
     [[nodiscard]] std::uint64_t Epoch() const noexcept;
+    void ReportDiagnostics(bool layouts = true) const noexcept;
 
   private:
     struct Implementation;

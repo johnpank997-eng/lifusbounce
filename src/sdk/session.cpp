@@ -1,5 +1,7 @@
 #include "sdk/session.hpp"
 #include "sdk/reader.hpp"
+#include "sdk/diagnostics.hpp"
+#include "core/diagnostics.hpp"
 #include <mutex>
 #include <thread>
 #include <algorithm>
@@ -40,6 +42,8 @@ struct Session::Implementation {
     DWORD target_pid_ = 0;
     Memory camera_process;
     std::jthread worker_;
+    int logged_progress_ = -1;
+    std::chrono::steady_clock::time_point logged_at_{};
 };
 
 std::optional<DWORD> FindProcess() {
@@ -65,11 +69,33 @@ void Session::Implementation::Publish(SessionStatus value, std::stop_token stop)
     if (!stop.stop_requested() && !pending_reload_) {
         value.pid = target_pid_;
         value.progress = std::max(status_.progress, std::clamp(value.progress, 0.0f, 1.0f));
+        const auto now = std::chrono::steady_clock::now();
+        const auto percent = static_cast<int>(value.progress * 100.0f);
+        const bool changed = value.waiting != status_.waiting || value.error != status_.error ||
+            (value.progress < 0.92f && value.message != status_.message) ||
+            (value.progress >= 1.0f && logged_progress_ < 100);
+        diagnostics::Phase(value.message, value.progress);
+        if ((changed &&
+                (value.progress < 0.92f || value.waiting != status_.waiting ||
+                    now - logged_at_ >= std::chrono::milliseconds(250))) ||
+            percent >= logged_progress_ + 5 || now - logged_at_ >= std::chrono::seconds(5)) {
+            diagnostics::Write("session_status",
+                {{"message", value.message}, {"win32", value.error},
+                    {"progress_percent", value.progress * 100.0f}, {"waiting", value.waiting},
+                    {"has_frame", value.frame != nullptr},
+                    {"players", value.frame ? value.frame->players : 0u},
+                    {"initialized", value.frame ? value.frame->initialized : 0u},
+                    {"skeletons", value.frame ? value.frame->entities.size() : 0u}});
+            logged_at_ = now;
+            logged_progress_ = percent;
+        }
         status_ = std::move(value);
     }
 }
 
 void Session::Implementation::SetEnabled(bool enabled) {
+    diagnostics::Initialize();
+    diagnostics::Write("session_enabled", {{"enabled", enabled}});
     worker_.request_stop();
     if (worker_.joinable())
         worker_.join();
@@ -80,6 +106,8 @@ void Session::Implementation::SetEnabled(bool enabled) {
         status_ = {};
         pending_reload_ = 0;
         worker_running_ = enabled;
+        logged_progress_ = -1;
+        logged_at_ = {};
     }
     if (!enabled)
         return;
@@ -91,12 +119,17 @@ void Session::Implementation::SetEnabled(bool enabled) {
         } catch (const std::exception&) {
             Publish({"locator scan failed", ERROR_NOT_ENOUGH_MEMORY}, stop);
         }
+        const auto final_status = Status();
+        diagnostics::Write("scan_finished",
+            {{"cancelled", stop.stop_requested()}, {"message", final_status.message},
+                {"win32", final_status.error}, {"progress_percent", final_status.progress * 100.0f}});
         const std::lock_guard lock(mutex_);
         worker_running_ = false;
     });
 }
 
 void Session::Implementation::Reload(ReloadTarget target) {
+    diagnostics::Write("reload_requested", {{"target", static_cast<unsigned>(target)}});
     if (target != ReloadTarget::all) {
         const std::lock_guard lock(mutex_);
         if (worker_running_ && status_.progress >= 0.92f) {
@@ -105,6 +138,7 @@ void Session::Implementation::Reload(ReloadTarget target) {
             status_.message = "reload queued";
             status_.error = ERROR_SUCCESS;
             status_.progress = 0.92f;
+            status_.waiting = false;
             return;
         }
     }
@@ -135,6 +169,7 @@ void Session::Implementation::Scan(std::stop_token stop) {
         Publish({"cannot read the game process", error}, stop);
         return;
     }
+    diagnostics::Write("game_attached", {{"pid", target->pid}});
     target_pid_ = target->pid;
     Publish({"reading the game module", ERROR_SUCCESS, target_pid_, {}, 0.05f}, stop);
     if (process.Is64Bit(error) != std::optional<bool>(true)) {
@@ -172,6 +207,11 @@ void Session::Implementation::Scan(std::stop_token stop) {
         return;
     }
     const auto& header = nt->OptionalHeader;
+    diagnostics::Write("game_image",
+        {{"pid", target->pid}, {"image_size", header.SizeOfImage},
+            {"pe_timestamp", nt->FileHeader.TimeDateStamp}, {"code_rva", header.BaseOfCode},
+            {"code_size", header.SizeOfCode}, {"machine", nt->FileHeader.Machine},
+            {"sections", nt->FileHeader.NumberOfSections}});
     const auto directory = header.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION];
     if (!InImage(directory.VirtualAddress, directory.Size, header.SizeOfImage) || !directory.Size ||
         directory.Size % sizeof(RuntimeFunction) || directory.Size > 32 * 1024 * 1024 || !header.SizeOfCode ||
@@ -198,6 +238,7 @@ void Session::Implementation::Scan(std::stop_token stop) {
     }
     Publish({"discovering native pointer and metadata paths", ERROR_SUCCESS, target_pid_, {}, 0.10f}, stop);
     locators::NativeDescriptor native;
+    DiscoveryDiagnostics discovery(module->address);
     {
         std::vector<std::byte> code(header.SizeOfCode);
         for (std::size_t offset = 0; offset < code.size();) {
@@ -215,13 +256,27 @@ void Session::Implementation::Scan(std::stop_token stop) {
                 0.10f + 0.50f * static_cast<float>(offset) / static_cast<float>(code.size());
             Publish({"reading native locator code", ERROR_SUCCESS, target_pid_, {}, progress}, stop);
         }
-        native = locators::Discover(code, header.BaseOfCode, module->address, functions, stop,
+        diagnostics::Phase("fingerprinting native code", 0.60f);
+        const auto code_hash = diagnostics::Sha256(code);
+        const auto functions_hash = diagnostics::Sha256(std::as_bytes(std::span(functions)));
+        diagnostics::Write("build_fingerprint",
+            {{"code_sha256", code_hash}, {"functions_sha256", functions_hash},
+                {"function_records", functions.size()}, {"code_rva", header.BaseOfCode},
+                {"code_size", header.SizeOfCode}, {"functions_rva", directory.VirtualAddress},
+                {"functions_size", directory.Size}});
+        native = locators::Discover(
+            code, header.BaseOfCode, module->address, functions, stop,
             [&](std::size_t completed, std::size_t total) {
                 const float progress = 0.60f +
                     0.30f * static_cast<float>(completed) /
                         static_cast<float>(std::max<std::size_t>(total, 1));
                 Publish({"discovering native paths", ERROR_SUCCESS, target_pid_, {}, progress}, stop);
-            });
+            },
+            [&](std::string_view role, const locators::FunctionRecord& function,
+                std::span<const std::byte> bytes, const Emulator::Program* decoded,
+                std::size_t accepted) { discovery.Observe(role, function, bytes, decoded, accepted); });
+        discovery.Report();
+        diagnostics::Phase("selected character discovery", 0.90f);
         if (!stop.stop_requested() && nt->FileHeader.NumberOfSections &&
             nt->FileHeader.NumberOfSections <= 96) {
             std::vector<IMAGE_SECTION_HEADER> sections(nt->FileHeader.NumberOfSections);
@@ -233,18 +288,35 @@ void Session::Implementation::Scan(std::stop_token stop) {
                         section.VirtualAddress < header.SizeOfImage &&
                         section.Misc.VirtualSize <= header.SizeOfImage - section.VirtualAddress) {
                         std::vector<std::byte> symbols(section.Misc.VirtualSize);
-                        if (process.ReadBytes(module->address + section.VirtualAddress, symbols).Complete())
+                        const auto read =
+                            process.ReadBytes(module->address + section.VirtualAddress, symbols);
+                        if (read.Complete())
                             native.selected_operator =
                                 locators::DiscoverOperatorSelection(code, header.BaseOfCode, module->address,
                                     functions, symbols, section.VirtualAddress);
+                        else
+                            diagnostics::Write("optional_section_failed",
+                                {{"role", "selected character"}, {"win32", read.error},
+                                    {"transferred", read.transferred}});
                     }
         }
     }
     if (stop.stop_requested())
         return;
-    if (native.roots.empty() || native.cameras.empty() || native.metadata.empty() ||
-        native.managers.empty() || native.arrays.empty() || native.poses.empty()) {
-        Publish({"native locator semantics were not resolved"}, stop);
+    diagnostics::Phase("recording native descriptors", 0.90f);
+    ReportNative(native, module->address);
+    const char* missing = native.roots.empty()          ? "roots"
+        : native.roots.size() != native.contexts.size() ? "thread contexts"
+        : native.cameras.empty()                        ? "camera"
+        : native.metadata.empty()                       ? "component metadata"
+        : native.managers.empty()                       ? "entity manager"
+        : native.arrays.empty()                         ? "entity array"
+        : native.poses.empty()                          ? "poses"
+        : native.rigs.empty()                           ? "rig lookup"
+                                                        : nullptr;
+    if (missing) {
+        diagnostics::Write("missing_prerequisite", {{"role", missing}});
+        Publish({std::string("this build needs a new ") + missing + " path", ERROR_NOT_SUPPORTED}, stop);
         return;
     }
     Reader reader(process, *module, *nt, std::move(native));
@@ -254,6 +326,9 @@ void Session::Implementation::Scan(std::stop_token stop) {
         nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_MODIFY_STATE | SYNCHRONIZE));
     if (!timer)
         timer.Reset(CreateWaitableTimerExW(nullptr, nullptr, 0, TIMER_MODIFY_STATE | SYNCHRONIZE));
+    auto waiting_since = std::chrono::steady_clock::now();
+    auto reported_at = waiting_since - std::chrono::seconds(5);
+    auto layouts_at = waiting_since - std::chrono::seconds(30);
     while (!stop.stop_requested()) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(8);
         unsigned reload = 0;
@@ -261,8 +336,10 @@ void Session::Implementation::Scan(std::stop_token stop) {
             const std::lock_guard lock(mutex_);
             reload = std::exchange(pending_reload_, 0u);
         }
-        if (reload)
+        if (reload) {
             reader.Reload(static_cast<ReloadTarget>(reload));
+            waiting_since = std::chrono::steady_clock::now();
+        }
         const auto alive = process.Read<std::uint16_t>(module->address);
         if (!alive || *alive != IMAGE_DOS_SIGNATURE) {
             target_pid_ = 0;
@@ -273,7 +350,21 @@ void Session::Implementation::Scan(std::stop_token stop) {
         if (!frame && !stop.stop_requested())
             frame = reader.Poll(stop);
         const bool ready = frame && (!frame->players || frame->initialized);
-        Publish({reader.Status(), reader.Error(), target_pid_, std::move(frame), ready ? 1.0f : 0.92f}, stop);
+        if (ready)
+            waiting_since = std::chrono::steady_clock::now();
+        const bool waiting =
+            !ready && std::chrono::steady_clock::now() - waiting_since >= std::chrono::seconds(20);
+        const auto report_now = std::chrono::steady_clock::now();
+        if (report_now - reported_at >= std::chrono::seconds(5)) {
+            const auto layouts = report_now - layouts_at >= std::chrono::seconds(30);
+            reader.ReportDiagnostics(layouts);
+            if (layouts)
+                layouts_at = report_now;
+            reported_at = report_now;
+        }
+        Publish({reader.Status(), reader.Error(), target_pid_, std::move(frame), ready ? 1.0f : 0.92f, false,
+                    waiting},
+            stop);
         const auto remaining = deadline - std::chrono::steady_clock::now();
         if (!stop.stop_requested() && remaining > std::chrono::steady_clock::duration::zero()) {
             LARGE_INTEGER due{};

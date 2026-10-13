@@ -256,8 +256,13 @@ bool ActionButton(const char* label) {
 DebugAction DebugControls() {
     const bool reload = ActionButton("reload software");
     ImGui::Dummy({0, 6});
+    const bool logs = ActionButton("open diagnostic logs");
+    ImGui::Dummy({0, 6});
     const bool quit = ActionButton("self destruct");
-    return quit ? DebugAction::quit : reload ? DebugAction::reload : DebugAction::none;
+    return quit  ? DebugAction::quit
+        : reload ? DebugAction::reload
+        : logs   ? DebugAction::logs
+                 : DebugAction::none;
 }
 
 bool MenuFrame(ImVec2 position, int& selected) {

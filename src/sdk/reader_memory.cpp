@@ -55,6 +55,7 @@ auto Reader::Implementation::Evaluate(const locators::PointerDescriptor& path, A
         put(path.input, object);
         const auto result = cpu.Run(seed.value.code);
         if (!result.Complete()) {
+            trace.Emulation("pointer_seed_emulation_failed", seeds.size(), result, module.address);
             emulation_error = result;
             throw ReadFailure{ERROR_NOT_SUPPORTED};
         }
@@ -66,6 +67,7 @@ auto Reader::Implementation::Evaluate(const locators::PointerDescriptor& path, A
         put(path.seeds[j].target, seeds[j]);
     const auto result = cpu.Run(path.code);
     if (!result.Complete()) {
+        trace.Emulation("pointer_emulation_failed", 0, result, module.address);
         emulation_error = result;
         throw ReadFailure{ERROR_NOT_SUPPORTED};
     }

@@ -2,6 +2,7 @@
 
 namespace base::sdk {
 auto Reader::Implementation::Poll(std::stop_token stop) -> std::shared_ptr<const Snapshot> {
+    trace.Count("polls");
     last_error = ERROR_SUCCESS;
     emulation_error.reset();
     ambiguous_bones = 0;
@@ -13,6 +14,7 @@ auto Reader::Implementation::Poll(std::stop_token stop) -> std::shared_ptr<const
             if (now < next_selection)
                 return {};
             if (!Select(stop)) {
+                trace.Count("selection_without_environment");
                 next_selection = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
                 if (emulation_error)
                     message = EmulationMessage();
@@ -154,10 +156,12 @@ auto Reader::Implementation::Poll(std::stop_token stop) -> std::shared_ptr<const
             array_expression.reset();
             next_selection = std::chrono::steady_clock::now() + std::chrono::milliseconds(50);
             message = "waiting for player components";
+            trace.Count("entity_array_without_player_components");
             return {};
         }
         const auto after = Resolve(env.teb, env.tls);
         if (!Equivalent(env, after)) {
+            trace.Count("environment_changed_during_read");
             message = "game data changed; refreshing";
             return {};
         }
@@ -201,6 +205,7 @@ auto Reader::Implementation::Poll(std::stop_token stop) -> std::shared_ptr<const
         frame->present = std::move(entries);
         frame->epoch = epoch;
         if (frame->captured - now > std::chrono::milliseconds(200)) {
+            trace.Count("frame_capture_over_200ms");
             message = "reading game data";
             return {};
         }
@@ -210,8 +215,10 @@ auto Reader::Implementation::Poll(std::stop_token stop) -> std::shared_ptr<const
             : "skeletons: " + std::to_string(frame->entities.size()) +
                 " | teammates: " + std::to_string(teammates) + (local_team ? "" : " | team unknown");
         failures = 0;
+        trace.Count("frames_published");
         return frame;
     } catch (ReadFailure failure) {
+        trace.Error("poll_read_failure", failure.error);
         last_error = failure.error;
         message = emulation_error ? EmulationMessage() : "waiting for readable game data";
         if (++failures >= 3) {

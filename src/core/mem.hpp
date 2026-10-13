@@ -1,6 +1,8 @@
 #pragma once
 #include "core/handle.hpp"
 #include <cstddef>
+#include <array>
+#include <utility>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -32,6 +34,12 @@ struct ReadResult {
     [[nodiscard]] bool Complete() const noexcept { return error == ERROR_SUCCESS; }
 };
 
+struct ReadStatistics {
+    std::uint64_t calls{}, requested{}, transferred{}, failures{};
+    DWORD last_error{};
+    std::array<std::pair<DWORD, std::uint64_t>, 16> errors{};
+};
+
 [[nodiscard]] std::wstring ErrorText(DWORD error);
 [[nodiscard]] std::vector<ProcessInfo> Processes(DWORD& error);
 
@@ -47,6 +55,8 @@ class Memory {
     [[nodiscard]] DWORD Pid() const noexcept { return pid_; }
 
     [[nodiscard]] bool Attached() const noexcept { return static_cast<bool>(driver_); }
+
+    [[nodiscard]] ReadStatistics Statistics() const noexcept { return statistics_; }
 
     [[nodiscard]] ReadResult ReadBytes(std::uintptr_t address, std::span<std::byte> output) const noexcept;
 
@@ -69,5 +79,6 @@ class Memory {
   private:
     UniqueHandle driver_;
     DWORD pid_ = 0;
+    mutable ReadStatistics statistics_;
 };
 }

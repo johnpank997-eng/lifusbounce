@@ -6,6 +6,7 @@
 #include <optional>
 #include <span>
 #include <stop_token>
+#include <string_view>
 #include "core/emulator.hpp"
 #include "sdk/equipment.hpp"
 
@@ -145,8 +146,12 @@ struct NativeDescriptor {
     std::span<const std::byte> code, std::uint32_t code_rva, std::uint64_t module,
     std::span<const FunctionRecord> functions, std::span<const std::byte> rdata, std::uint32_t rdata_rva);
 
+using DiscoveryObserver = std::function<void(std::string_view, const FunctionRecord&,
+    std::span<const std::byte>, const Emulator::Program*, std::size_t)>;
+
 [[nodiscard]] NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rva,
     std::uint64_t module, std::span<const FunctionRecord> functions, std::stop_token stop,
-    const std::function<void(std::size_t, std::size_t)>& progress = {});
+    const std::function<void(std::size_t, std::size_t)>& progress = {},
+    const DiscoveryObserver& observer = {});
 
 }

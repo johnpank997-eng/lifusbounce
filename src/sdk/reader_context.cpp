@@ -11,15 +11,21 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                 continue;
             cpu.Reset(teb);
             const auto& context = native.contexts[index];
-            if (!cpu.Run(context.code).Complete() || cpu.Get(context.output) != 0)
+            if (!trace.Run(cpu, context.code, "context_emulation_failed", index, module.address))
                 continue;
+            if (cpu.Get(context.output) != 0) {
+                trace.Count("context_unselected");
+                continue;
+            }
             const auto& expression = native.roots[index];
             cpu.Reset(teb);
-            if (!cpu.Run(expression.code).Complete())
+            if (!trace.Run(cpu, expression.code, "root_emulation_failed", index, module.address))
                 continue;
             const auto parent = cpu.Get(expression.output);
-            if (!Pointer(parent) || !Section(Q(parent)))
+            if (!Pointer(parent) || !Section(Q(parent))) {
+                trace.Count("root_pointer_rejected");
                 continue;
+            }
             for (std::size_t candidate = 0; candidate < native.managers.size(); ++candidate)
                 try {
                     if (manager_expression && candidate != *manager_expression)
@@ -27,11 +33,13 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                     const auto& path = native.managers[candidate];
                     cpu.Reset(teb);
                     cpu.Set(ZYDIS_REGISTER_RCX, parent);
-                    if (!cpu.Run(path.code).Complete())
+                    if (!trace.Run(cpu, path.code, "manager_emulation_failed", candidate, module.address))
                         continue;
                     const auto manager = cpu.Get(path.output);
-                    if (!Pointer(manager) || !Section(Q(manager)))
+                    if (!Pointer(manager) || !Section(Q(manager))) {
+                        trace.Count("manager_pointer_rejected");
                         continue;
+                    }
                     for (std::size_t recipe = 0; recipe < native.arrays.size(); ++recipe)
                         try {
                             if (array_expression && recipe != *array_expression)
@@ -39,12 +47,15 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                             const auto& extraction = native.arrays[recipe];
                             cpu.Reset(teb);
                             cpu.Set(extraction.input, manager);
-                            if (!cpu.Run(extraction.code).Complete())
+                            if (!trace.Run(
+                                    cpu, extraction.code, "array_emulation_failed", recipe, module.address))
                                 continue;
                             const auto entries = cpu.Get(extraction.array);
                             const auto count = cpu.Get(extraction.count) & 0x3fffffffull;
-                            if (!Pointer(entries) || !count || count > 0x3000)
+                            if (!Pointer(entries) || !count || count > 0x3000) {
+                                trace.Count("entity_array_bounds_rejected");
                                 continue;
+                            }
                             bool typed = false;
                             for (const auto first :
                                 Array<Address>(entries, std::min<std::uint64_t>(count, 16)))
@@ -55,8 +66,10 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                                     }
                                 } catch (ReadFailure) {
                                 }
-                            if (!typed)
+                            if (!typed) {
+                                trace.Count("entity_array_without_typed_entries");
                                 continue;
+                            }
 
                             if (!selected) {
                                 const auto key = std::pair{entries, static_cast<std::uint32_t>(count)};
@@ -69,11 +82,14 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                                     probe.manager = manager;
                                     probe.array = entries;
                                     probe.count = static_cast<std::uint32_t>(count);
+                                    trace.Count("root_manager_array_probe");
                                     SelectMetadata(probe, {});
                                     selection_arrays.emplace(key, metadata);
                                 }
-                                if (!metadata)
+                                if (!metadata) {
+                                    trace.Count("entity_array_without_component_metadata");
                                     continue;
+                                }
                                 matched_metadata = metadata;
                             }
                             if (e.parent &&
@@ -83,18 +99,22 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                             e.manager = manager;
                             e.array = entries;
                             e.count = static_cast<std::uint32_t>(count);
+                            trace.Count("root_manager_array_verified");
                             matched_root = index;
                             matched_manager = candidate;
                             matched_array = recipe;
                         } catch (ReadFailure failure) {
+                            trace.Error("array_path_rejected", failure.error);
                             if (failure.error == ERROR_DUP_NAME)
                                 throw;
                         }
                 } catch (ReadFailure failure) {
+                    trace.Error("manager_path_rejected", failure.error);
                     if (failure.error == ERROR_DUP_NAME)
                         throw;
                 }
         } catch (ReadFailure failure) {
+            trace.Error("root_path_rejected", failure.error);
             if (failure.error == ERROR_DUP_NAME)
                 throw;
         }
@@ -115,22 +135,30 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                 continue;
             const auto& expression = native.cameras[index];
             cpu.Reset(teb);
-            if (!cpu.Run(expression.code).Complete())
+            if (!trace.Run(cpu, expression.code, "camera_emulation_failed", index, module.address))
                 continue;
             const auto parent = cpu.Get(expression.output);
-            if (!Pointer(parent) || !Section(Q(parent)))
+            if (!Pointer(parent) || !Section(Q(parent))) {
+                trace.Count("camera_parent_rejected");
                 continue;
+            }
             const auto camera = Q(parent + 0xf00);
-            if (!Pointer(camera))
+            if (!Pointer(camera)) {
+                trace.Count("camera_pointer_rejected");
                 continue;
+            }
             const auto view = Read<skeleton::Matrix>(camera + 0x2c0);
-            if (!Projection(view))
+            if (!Projection(view)) {
+                trace.Count("camera_matrix_rejected");
                 continue;
+            }
             if (e.camera && e.camera != camera)
                 throw ReadFailure{ERROR_DUP_NAME};
+            trace.Count("camera_verified");
             e.camera = camera;
             matched_camera = index;
         } catch (ReadFailure failure) {
+            trace.Error("camera_path_rejected", failure.error);
             if (failure.error == ERROR_DUP_NAME)
                 throw;
         }
@@ -154,8 +182,11 @@ auto Reader::Implementation::Select(std::stop_token stop) -> bool {
     message = "selecting the game thread environment";
     DWORD terr = ERROR_SUCCESS;
     const auto tlist = process.Threads(terr);
-    if (terr)
+    trace.Count("selection_attempts");
+    if (terr) {
+        trace.Error("thread_enumeration_failed", terr);
         throw ReadFailure{terr};
+    }
     selection_arrays.clear();
     std::optional<Environment> accepted;
     std::optional<locators::MetadataDescriptor> accepted_metadata;
@@ -163,14 +194,20 @@ auto Reader::Implementation::Select(std::stop_token stop) -> bool {
         if (stop.stop_requested())
             return false;
         try {
+            trace.Count("threads_checked");
             const auto teb = static_cast<Address>(t.teb);
-            if (!Pointer(teb) || Q(teb + 0x30) != teb)
+            if (!Pointer(teb) || Q(teb + 0x30) != teb) {
+                trace.Count("thread_teb_rejected");
                 continue;
+            }
             const auto tls = Q(Q(teb + 0x58) + tls_index * 8ull);
-            if (!Pointer(tls))
+            if (!Pointer(tls)) {
+                trace.Count("thread_tls_rejected");
                 continue;
+            }
             const auto candidate = Resolve(teb, tls);
             if (accepted && !Equivalent(*accepted, candidate)) {
+                trace.Count("thread_environments_disagree");
                 message = "thread environments disagree";
                 selected.reset();
                 return false;
@@ -179,7 +216,8 @@ auto Reader::Implementation::Select(std::stop_token stop) -> bool {
                 accepted = candidate;
                 accepted_metadata = metadata;
             }
-        } catch (ReadFailure) {
+        } catch (ReadFailure failure) {
+            trace.Error("thread_environment_rejected", failure.error);
         }
     }
     selected = accepted;
@@ -200,6 +238,7 @@ auto Reader::Implementation::SelectMetadata(const Environment& env, std::stop_to
     std::optional<locators::MetadataDescriptor> accepted;
     const auto entries = Array<Address>(env.array, env.count);
     for (const auto& candidate : native.metadata) {
+        trace.Count("metadata_recipes_tested");
         metadata = candidate;
         hashes.clear();
         extents.clear();
@@ -225,6 +264,7 @@ auto Reader::Implementation::SelectMetadata(const Environment& env, std::stop_to
                 extents.clear();
                 throw ReadFailure{ERROR_DUP_NAME};
             }
+            trace.Count("component_metadata_verified");
             accepted = candidate;
         }
     }

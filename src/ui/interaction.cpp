@@ -43,8 +43,8 @@ void Interaction::BeginLoading() {
     ReleaseInput();
 }
 
-void Interaction::UpdateLoading(float progress) {
-    if (loading && std::isfinite(progress) && progress >= 1.0f) {
+void Interaction::UpdateLoading(float progress, bool running) {
+    if (loading && (!running || (std::isfinite(progress) && progress >= 1.0f))) {
         loading = false;
         ReleaseInput();
     }
