@@ -216,6 +216,10 @@ void ReportNative(const locators::NativeDescriptor& native, std::uint64_t module
             diagnostics::Write("array_recipe",
                 {{"index", i}, {"input", Register(value.input)}, {"array", Register(value.array)},
                     {"count", Register(value.count)}});
+            if (value.caller_slot)
+                diagnostics::Write("array_caller_context",
+                    {{"index", i}, {"slot", *value.caller_slot},
+                        {"caller_rva", diagnostics::Hex(value.caller - module)}});
             ReportProgram("array", i, value.code, module);
         }
         for (std::size_t i = 0; i < std::min<std::size_t>(native.rigs.size(), 64); ++i) {
@@ -242,6 +246,8 @@ void ReportNative(const locators::NativeDescriptor& native, std::uint64_t module
 }
 
 void RuntimeDiagnostics::Count(std::string_view name) noexcept {
+    if (!diagnostics::Enabled())
+        return;
     try {
         if (++counters[name] == 1)
             diagnostics::Write("runtime_first_seen", {{"reason", name}});
@@ -250,17 +256,22 @@ void RuntimeDiagnostics::Count(std::string_view name) noexcept {
 }
 
 void RuntimeDiagnostics::Probe(std::string_view stage, std::size_t index, std::uint64_t address,
-    std::uint64_t value, bool accepted) noexcept {
+    std::uint64_t value, bool accepted, std::uint64_t owner) noexcept {
+    if (!diagnostics::Enabled())
+        return;
     try {
-        if (probes.size() < 256 && probes.emplace(stage, index, accepted).second)
+        if (probes.size() < ProbeLimit && probes.emplace(stage, index, accepted, owner).second)
             diagnostics::Write("runtime_probe",
                 {{"stage", stage}, {"path_index", index}, {"address", diagnostics::Hex(address)},
-                    {"value", diagnostics::Hex(value)}, {"accepted", accepted}});
+                    {"value", diagnostics::Hex(value)}, {"accepted", accepted},
+                    {"owner", diagnostics::Hex(owner)}});
     } catch (...) {
     }
 }
 
 void RuntimeDiagnostics::Error(std::string_view stage, DWORD error) noexcept {
+    if (!diagnostics::Enabled())
+        return;
     try {
         Count(stage);
         if (examples.size() < 128 && examples.emplace(stage, 0, error, 0).second)
@@ -280,6 +291,8 @@ bool RuntimeDiagnostics::Run(Emulator& cpu, const Emulator::Program& code, std::
 
 void RuntimeDiagnostics::Emulation(
     std::string_view stage, std::size_t index, const EmulationResult& result, std::uint64_t module) noexcept {
+    if (!diagnostics::Enabled())
+        return;
     Count(stage);
     try {
         if (examples.size() < 128 &&
@@ -303,7 +316,18 @@ void RuntimeDiagnostics::Report() const noexcept {
     for (const auto& [name, count] : counters)
         diagnostics::Write("runtime_counter", {{"reason", name}, {"count", count}});
     diagnostics::Write("runtime_evidence_summary",
-        {{"executions", captured_executions}, {"execution_limit", 128u}, {"reads_per_execution_limit", 128u},
-            {"additional_execution_capacity", captured_executions < 128}});
+        {{"executions", captured_executions}, {"execution_limit", ExecutionLimit},
+            {"reads_per_execution_limit", ReadLimit}, {"stage_execution_limit", StageExecutionLimit},
+            {"array_input_executions", array_executions}, {"array_input_limit", ArrayInputLimit},
+            {"distinct_failures", execution_failures.size()},
+            {"distinct_failure_limit", ExecutionFailureLimit}, {"execution_keys", executions.size()},
+            {"execution_key_limit", ExecutionLimit}, {"observed_executions", observed_executions},
+            {"discarded_executions", discarded_executions}, {"probes", probes.size()},
+            {"probe_limit", ProbeLimit}, {"retry_seconds", 30u},
+            {"input_key", "registers vectors gs flags stack fingerprint"},
+            {"execution_budget_remaining", ExecutionLimit - captured_executions},
+            {"array_input_budget_remaining", ArrayInputLimit - array_executions},
+            {"distinct_failure_budget_remaining", ExecutionFailureLimit - execution_failures.size()},
+            {"additional_execution_capacity", captured_executions < ExecutionLimit}});
 }
 }

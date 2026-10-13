@@ -5,6 +5,7 @@
 #include <cmath>
 #include <limits>
 #include <stdexcept>
+#include <intrin.h>
 
 namespace base {
 namespace {
@@ -348,7 +349,9 @@ void Emulator::Step(const Decoded& d) {
         return;
     }
     case ZYDIS_MNEMONIC_MOVAPS:
-    case ZYDIS_MNEMONIC_MOVUPS: {
+    case ZYDIS_MNEMONIC_MOVUPS:
+    case ZYDIS_MNEMONIC_MOVDQA:
+    case ZYDIS_MNEMONIC_MOVDQU: {
         std::array<std::uint64_t, 2> data{};
         if (y.type == ZYDIS_OPERAND_TYPE_REGISTER && ZydisRegisterGetClass(y.reg.value) == ZYDIS_REGCLASS_XMM)
             data = vectors_.at(ZydisRegisterGetId(y.reg.value));
@@ -365,6 +368,27 @@ void Emulator::Step(const Decoded& d) {
             Store(at + 8, 64, data[1]);
         } else
             throw Fault{EmulationStatus::invalid_operand};
+        return;
+    }
+    case ZYDIS_MNEMONIC_MOVQ: {
+        const auto vector = [](const ZydisDecodedOperand& operand) {
+            return operand.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                ZydisRegisterGetClass(operand.reg.value) == ZYDIS_REGCLASS_XMM;
+        };
+        const auto scalar = [](const ZydisDecodedOperand& operand) {
+            return operand.size == 64 &&
+                (operand.type == ZYDIS_OPERAND_TYPE_MEMORY ||
+                    (operand.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                        ZydisRegisterGetClass(operand.reg.value) == ZYDIS_REGCLASS_GPR64));
+        };
+        if (i.operand_count_visible != 2 || (!vector(x) && !vector(y)) || (!vector(x) && !scalar(x)) ||
+            (!vector(y) && !scalar(y)))
+            throw Fault{EmulationStatus::invalid_operand};
+        const auto data = y.type == ZYDIS_OPERAND_TYPE_MEMORY ? Load(Address(y), 64) : Value(y);
+        if (vector(x))
+            vectors_.at(ZydisRegisterGetId(x.reg.value)) = {data, 0};
+        else
+            Write(x, data);
         return;
     }
     case ZYDIS_MNEMONIC_MOVD:
@@ -524,6 +548,38 @@ void Emulator::Step(const Decoded& d) {
         return;
     }
     case ZYDIS_MNEMONIC_IMUL: {
+        if (i.operand_count_visible == 1) {
+            const unsigned bits = x.size;
+            if (bits != 8 && bits != 16 && bits != 32 && bits != 64)
+                throw Fault{EmulationStatus::invalid_operand};
+            const auto limit = Mask(bits), sign = 1ull << (bits - 1);
+            const auto a = Get(ZYDIS_REGISTER_RAX) & limit, b = Value(x) & limit;
+            const auto signed_value = [&](std::uint64_t value) {
+                return std::bit_cast<std::int64_t>((value ^ sign) - sign);
+            };
+            std::uint64_t low{}, high{};
+            if (bits == 64) {
+                std::int64_t upper{};
+                low = std::bit_cast<std::uint64_t>(_mul128(signed_value(a), signed_value(b), &upper));
+                high = std::bit_cast<std::uint64_t>(upper);
+                Set(ZYDIS_REGISTER_RAX, low);
+                Set(ZYDIS_REGISTER_RDX, high);
+            } else {
+                const auto product = std::bit_cast<std::uint64_t>(signed_value(a) * signed_value(b));
+                low = product & limit;
+                high = (product >> bits) & limit;
+                if (bits == 8)
+                    Set(ZYDIS_REGISTER_AX, product);
+                else {
+                    Set(bits == 16 ? ZYDIS_REGISTER_AX : ZYDIS_REGISTER_EAX, low);
+                    Set(bits == 16 ? ZYDIS_REGISTER_DX : ZYDIS_REGISTER_EDX, high);
+                }
+            }
+            flags_ &= ~(cf | of);
+            if (high != ((low & sign) ? limit : 0))
+                flags_ |= cf | of;
+            return;
+        }
         if (i.operand_count_visible < 2 || i.operand_count_visible > 3)
             throw Fault{EmulationStatus::unsupported};
         const auto a = i.operand_count_visible == 3 ? Value(y) : Value(x),

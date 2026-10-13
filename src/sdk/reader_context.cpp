@@ -5,6 +5,7 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
     Environment e{teb, tls};
     std::optional<std::size_t> matched_root, matched_camera, matched_manager, matched_array;
     std::optional<locators::MetadataDescriptor> matched_metadata;
+    std::set<std::pair<Address, Address>> evaluated_managers;
     for (std::size_t index = 0; index < native.roots.size(); ++index)
         try {
             if (root_expression && index != *root_expression)
@@ -44,6 +45,10 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                         trace.Count("manager_pointer_rejected");
                         continue;
                     }
+                    if (!evaluated_managers.emplace(parent, manager).second) {
+                        trace.Count("manager_receiver_already_evaluated");
+                        continue;
+                    }
                     for (std::size_t recipe = 0; recipe < native.arrays.size(); ++recipe)
                         try {
                             if (array_expression && recipe != *array_expression)
@@ -51,13 +56,15 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                             const auto& extraction = native.arrays[recipe];
                             cpu.Reset(teb);
                             cpu.Set(extraction.input, manager);
+                            if (extraction.caller_slot)
+                                cpu.Stack(*extraction.caller_slot, extraction.caller);
                             if (!trace.Run(
                                     cpu, extraction.code, "array_emulation_failed", recipe, module.address))
                                 continue;
                             const auto entries = cpu.Get(extraction.array);
                             const auto count = cpu.Get(extraction.count) & 0x3fffffffull;
                             trace.Probe("entity array bounds", recipe, entries, count,
-                                Pointer(entries) && count && count <= 0x3000);
+                                Pointer(entries) && count && count <= 0x3000, manager);
                             if (!Pointer(entries) || !count || count > 0x3000) {
                                 trace.Count("entity_array_bounds_rejected");
                                 continue;

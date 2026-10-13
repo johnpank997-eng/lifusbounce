@@ -6,7 +6,7 @@
 namespace base::sdk {
 namespace {
 struct ExecutionReads {
-    std::array<Emulator::Access, 128> reads{};
+    std::array<Emulator::Access, RuntimeDiagnostics::ReadLimit> reads{};
     unsigned count{}, total{};
 };
 
@@ -23,6 +23,17 @@ void Number(std::vector<std::byte>& bytes, std::uint64_t value, unsigned width =
 
 std::string Key(std::string_view name, std::span<const std::byte> bytes) {
     return std::string(name) + ":0x0:" + diagnostics::Sha256(bytes);
+}
+
+std::array<std::uint64_t, 2> StackKey(std::span<const std::byte> bytes) {
+    std::array<std::uint64_t, 2> result{0xcbf29ce484222325ull, 0x9e3779b97f4a7c15ull};
+    for (std::size_t i = 0; i < bytes.size(); i += sizeof(std::uint64_t)) {
+        std::uint64_t value{};
+        std::memcpy(&value, bytes.data() + i, sizeof(value));
+        result[0] = (result[0] ^ value) * 0x100000001b3ull;
+        result[1] = (result[1] + value) * 0x9e3779b185ebca87ull;
+    }
+    return result;
 }
 
 std::vector<std::byte> Program(const Emulator::Program& code, std::uint64_t module) {
@@ -75,16 +86,28 @@ std::vector<std::byte> Program(const Emulator::Program& code, std::uint64_t modu
 EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Program& code,
     std::string_view stage, std::size_t index, std::uint64_t module) {
     bool observe{};
+    ExecutionKey key;
+    Emulator::State before{};
     try {
-        const auto key = std::pair{stage, index};
-        observe = diagnostics::Enabled() && captured_executions < 128 && executions.size() < 1024 &&
-            executions[key] != 3 && std::chrono::steady_clock::now() >= execution_retry[key];
+        const auto samples = execution_samples.find(stage);
+        const bool stage_capacity =
+            samples == execution_samples.end() || samples->second < StageExecutionLimit;
+        if (diagnostics::Enabled() && captured_executions < ExecutionLimit &&
+            (stage_capacity || !successful_stages.contains(stage) ||
+                execution_failures.size() < ExecutionFailureLimit ||
+                (stage == "array_emulation_failed" && array_executions < ArrayInputLimit))) {
+            before = cpu.Snapshot();
+            key = {stage, index, code.begin, code.end, before.registers, before.vectors, before.gs,
+                before.flags, StackKey(cpu.StackData())};
+            const auto retry = execution_retry.find(key);
+            observe = retry == execution_retry.end() || std::chrono::steady_clock::now() >= retry->second;
+        }
     } catch (...) {
     }
     if (!observe)
         return cpu.Run(code);
+    ++observed_executions;
     ExecutionReads collected;
-    const auto before = cpu.Snapshot();
     std::array<std::byte, 0x10000> stack{};
     std::memcpy(stack.data(), cpu.StackData().data(), stack.size());
     Observation observation{cpu};
@@ -106,14 +129,34 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
     }
     cpu.Observe({});
     try {
-        auto& flags = executions[{stage, index}];
-        execution_retry[{stage, index}] = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        const auto prior = executions.find(key);
+        const unsigned flags = prior == executions.end() ? 0 : prior->second;
         const unsigned bit = result.Complete() ? 2u : 1u;
         const bool first_success = result.Complete() && !successful_stages.contains(stage);
-        const bool keep = !(flags & bit) && (first_success || execution_samples[stage] < 8);
-        flags |= bit;
-        if (!keep)
+        const bool distinct_failure = !result.Complete() &&
+            execution_failures.size() < ExecutionFailureLimit &&
+            !execution_failures.contains(
+                {stage, static_cast<unsigned>(result.status), result.address, result.mnemonic});
+        const bool array_input =
+            stage == "array_emulation_failed" && array_executions < ArrayInputLimit && !(flags & bit);
+        const auto samples = execution_samples.find(stage);
+        const bool stage_capacity =
+            samples == execution_samples.end() || samples->second < StageExecutionLimit;
+        const bool keep =
+            distinct_failure || array_input || (!(flags & bit) && (first_success || stage_capacity));
+        if (prior != executions.end())
+            execution_retry[key] = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        if (!keep) {
+            ++discarded_executions;
             return result;
+        }
+        executions[key] = flags | bit;
+        execution_retry[key] = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        if (array_input)
+            ++array_executions;
+        if (distinct_failure)
+            execution_failures.emplace(
+                stage, static_cast<unsigned>(result.status), result.address, result.mnemonic);
         if (result.Complete())
             successful_stages.emplace(stage);
         ++execution_samples[stage];

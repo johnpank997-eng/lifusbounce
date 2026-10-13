@@ -75,6 +75,8 @@ struct FunctionRecord {
 struct ArrayDescriptor {
     Emulator::Program code;
     ZydisRegister input = ZYDIS_REGISTER_NONE, array = ZYDIS_REGISTER_NONE, count = ZYDIS_REGISTER_NONE;
+    std::optional<std::uint32_t> caller_slot;
+    std::uint64_t caller{};
 };
 
 struct PoseDescriptor {
@@ -124,7 +126,9 @@ struct AffiliationDescriptor {
     bool pointer_identity = true;
 };
 
-[[nodiscard]] std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code);
+using NativeResolver = std::function<std::optional<Emulator::Program>(std::uint64_t)>;
+[[nodiscard]] std::vector<ArrayDescriptor> Arrays(
+    const Emulator::Program& code, const NativeResolver& resolve = {});
 [[nodiscard]] std::vector<PoseDescriptor> Poses(
     const Emulator::Program& code, const ValidationObserver& validation = {});
 
