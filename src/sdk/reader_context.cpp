@@ -38,7 +38,8 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                     const auto& path = native.managers[candidate];
                     cpu.Reset(teb);
                     cpu.Set(ZYDIS_REGISTER_RCX, parent);
-                    if (!trace.Run(cpu, path.code, "manager_emulation_failed", candidate, module.address))
+                    if (!trace.Run(cpu, path.code, "manager_emulation_failed", candidate, module.address, 0,
+                            path.output))
                         continue;
                     const auto manager = cpu.Get(path.output);
                     trace.Probe("manager receiver pointer", candidate, parent, manager, Pointer(manager));
@@ -56,15 +57,20 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                             if (array_expression && recipe != *array_expression)
                                 continue;
                             const auto& extraction = native.arrays[recipe];
+                            if (!extraction.count_mask || extraction.count_mask > 0x3fffffffull ||
+                                (extraction.count_mask & (extraction.count_mask + 1))) {
+                                trace.Count("entity_array_count_mask_rejected");
+                                continue;
+                            }
                             cpu.Reset(teb);
                             cpu.Set(extraction.input, manager);
                             if (extraction.caller_slot)
                                 cpu.Stack(*extraction.caller_slot, extraction.caller);
-                            if (!trace.Run(
-                                    cpu, extraction.code, "array_emulation_failed", recipe, module.address))
+                            if (!trace.Run(cpu, extraction.code, "array_emulation_failed", recipe,
+                                    module.address, manager))
                                 continue;
                             const auto entries = cpu.Get(extraction.array);
-                            const auto count = cpu.Get(extraction.count) & 0x3fffffffull;
+                            const auto count = cpu.Get(extraction.count) & extraction.count_mask;
                             trace.Probe("entity array bounds", recipe, entries, count,
                                 Pointer(entries) && count && count <= 0x3000, manager);
                             if (!Pointer(entries) || !count || count > 0x3000) {

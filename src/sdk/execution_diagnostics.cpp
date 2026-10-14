@@ -84,21 +84,39 @@ std::vector<std::byte> Program(const Emulator::Program& code, std::uint64_t modu
 }
 
 EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Program& code,
-    std::string_view stage, std::size_t index, std::uint64_t module) {
+    std::string_view stage, std::size_t index, std::uint64_t module, std::uint64_t array_receiver,
+    ZydisRegister manager_output) {
     bool observe{};
     ExecutionKey key;
     Emulator::State before{};
+    std::uint64_t manager_before{};
+    const bool receiver_array = stage == "array_emulation_failed" && array_receiver != 0;
+    const bool manager_hint = stage == "manager_emulation_failed" && manager_output >= ZYDIS_REGISTER_RAX &&
+        manager_output <= ZYDIS_REGISTER_R15 && manager_output != ZYDIS_REGISTER_RSP;
+    const ManagerRecipeKey manager_recipe{stage, index, code.begin, code.end};
+    const bool manager_recipe_first = stage == "manager_emulation_failed" &&
+        manager_recipe_examples.size() < ManagerRecipeExampleLimit &&
+        !manager_recipe_examples.contains(manager_recipe);
+    const auto receiver_samples = array_receiver_executions.find(array_receiver);
+    const bool receiver_capacity = receiver_samples == array_receiver_executions.end()
+        ? array_receiver_executions.size() < ArrayReceiverLimit
+        : receiver_samples->second < ArrayReceiverExecutionLimit;
     try {
         const auto samples = execution_samples.find(stage);
         const bool stage_capacity =
             samples == execution_samples.end() || samples->second < StageExecutionLimit;
         if (diagnostics::Enabled() && captured_executions < ExecutionLimit &&
+            (!receiver_array || (receiver_capacity && array_executions < ArrayInputLimit)) &&
             (stage_capacity || !successful_stages.contains(stage) ||
                 execution_failures.size() < ExecutionFailureLimit ||
-                (stage == "array_emulation_failed" && array_executions < ArrayInputLimit))) {
+                (stage == "array_emulation_failed" && array_executions < ArrayInputLimit) ||
+                manager_recipe_first ||
+                (manager_hint && manager_output_executions.size() < ManagerOutputExecutionLimit))) {
             before = cpu.Snapshot();
+            if (manager_hint)
+                manager_before = cpu.Get(manager_output);
             key = {stage, index, code.begin, code.end, before.registers, before.vectors, before.gs,
-                before.flags, StackKey(cpu.StackData())};
+                before.flags, StackKey(cpu.StackData()), receiver_array ? array_receiver : 0};
             const auto retry = execution_retry.find(key);
             observe = retry == execution_retry.end() || std::chrono::steady_clock::now() >= retry->second;
         }
@@ -142,8 +160,16 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
         const auto samples = execution_samples.find(stage);
         const bool stage_capacity =
             samples == execution_samples.end() || samples->second < StageExecutionLimit;
-        const bool keep =
-            distinct_failure || array_input || (!(flags & bit) && (first_success || stage_capacity));
+        const auto manager_value = manager_hint ? cpu.Get(manager_output) : 0;
+        const bool manager_canonical = manager_hint && result.Complete() && manager_value >= 0x10000 &&
+            manager_value <= 0x7fffffffffffull && manager_value != manager_before;
+        const bool manager_priority = result.Complete() && manager_canonical && !(flags & bit) &&
+            !stage_capacity && !manager_recipe_first &&
+            manager_output_executions.size() < ManagerOutputExecutionLimit &&
+            !manager_output_executions.contains(key);
+        const bool keep = (!receiver_array || (receiver_capacity && array_executions < ArrayInputLimit)) &&
+            (distinct_failure || array_input || manager_recipe_first || manager_priority ||
+                (!(flags & bit) && (first_success || stage_capacity)));
         if (prior != executions.end())
             execution_retry[key] = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         if (!keep) {
@@ -152,8 +178,14 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
         }
         executions[key] = flags | bit;
         execution_retry[key] = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-        if (array_input)
+        if (array_input || receiver_array)
             ++array_executions;
+        if (receiver_array)
+            ++array_receiver_executions[array_receiver];
+        if (manager_priority)
+            manager_output_executions.emplace(key);
+        if (manager_recipe_first)
+            manager_recipe_examples.emplace(manager_recipe);
         if (distinct_failure)
             execution_failures.emplace(
                 stage, static_cast<unsigned>(result.status), result.address, result.mnemonic);
@@ -202,7 +234,13 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
                 {"instructions_artifact", Key("execution_program", instructions)}, {"program_format", 1u},
                 {"read_record_bytes", 33u}, {"reads_captured", collected.count},
                 {"reads_total", collected.total}, {"status", static_cast<unsigned>(result.status)},
-                {"steps", result.steps}, {"stop_rva", diagnostics::Hex(result.address - module)}});
+                {"steps", result.steps}, {"stop_rva", diagnostics::Hex(result.address - module)},
+                {"array_receiver", diagnostics::Hex(receiver_array ? array_receiver : 0)},
+                {"manager_output_register", manager_hint ? ZydisRegisterGetString(manager_output) : "none"},
+                {"manager_output_value", diagnostics::Hex(manager_value)},
+                {"manager_output_canonical_hint", manager_canonical},
+                {"manager_recipe_first", manager_recipe_first}, {"manager_output_priority", manager_priority},
+                {"receiver_role_verified", false}});
         const bool complete = diagnostics::Artifact("execution_state", 0, state) &&
             diagnostics::Artifact("execution_output", 0, output) &&
             diagnostics::Artifact("execution_stack", 0, stack) &&

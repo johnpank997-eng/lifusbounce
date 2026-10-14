@@ -77,6 +77,7 @@ struct ArrayDescriptor {
     ZydisRegister input = ZYDIS_REGISTER_NONE, array = ZYDIS_REGISTER_NONE, count = ZYDIS_REGISTER_NONE;
     std::optional<std::uint32_t> caller_slot;
     std::uint64_t caller{};
+    std::uint64_t count_mask{0x3fffffffull};
 };
 
 struct PoseDescriptor {
@@ -129,8 +130,9 @@ struct AffiliationDescriptor {
 };
 
 using NativeResolver = std::function<std::optional<Emulator::Program>(std::uint64_t)>;
-[[nodiscard]] std::vector<ArrayDescriptor> Arrays(
-    const Emulator::Program& code, const NativeResolver& resolve = {});
+[[nodiscard]] std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code,
+    const NativeResolver& resolve = {}, std::span<const std::byte> native_bytes = {},
+    std::vector<Expression>* closed_owners = nullptr);
 [[nodiscard]] std::vector<PoseDescriptor> Poses(
     const Emulator::Program& code, const ValidationObserver& validation = {});
 

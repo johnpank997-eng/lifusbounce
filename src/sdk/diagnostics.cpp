@@ -244,7 +244,7 @@ void ReportNative(const locators::NativeDescriptor& native, std::uint64_t module
             const auto& value = native.arrays[i];
             diagnostics::Write("array_recipe",
                 {{"index", i}, {"input", Register(value.input)}, {"array", Register(value.array)},
-                    {"count", Register(value.count)}});
+                    {"count", Register(value.count)}, {"count_mask", diagnostics::Hex(value.count_mask)}});
             if (value.caller_slot)
                 diagnostics::Write("array_caller_context",
                     {{"index", i}, {"slot", *value.caller_slot},
@@ -392,8 +392,8 @@ void RuntimeDiagnostics::Error(std::string_view stage, DWORD error) noexcept {
 }
 
 bool RuntimeDiagnostics::Run(Emulator& cpu, const Emulator::Program& code, std::string_view stage,
-    std::size_t index, std::uint64_t module) {
-    const auto result = Execute(cpu, code, stage, index, module);
+    std::size_t index, std::uint64_t module, std::uint64_t array_receiver, ZydisRegister manager_output) {
+    const auto result = Execute(cpu, code, stage, index, module, array_receiver, manager_output);
     if (result.Complete())
         return true;
     Emulation(stage, index, result, module);
@@ -430,15 +430,31 @@ void RuntimeDiagnostics::Report() const noexcept {
         {{"executions", captured_executions}, {"execution_limit", ExecutionLimit},
             {"reads_per_execution_limit", ReadLimit}, {"stage_execution_limit", StageExecutionLimit},
             {"array_input_executions", array_executions}, {"array_input_limit", ArrayInputLimit},
+            {"array_receiver_identities", array_receiver_executions.size()},
+            {"array_receiver_limit", ArrayReceiverLimit},
+            {"array_receiver_execution_limit", ArrayReceiverExecutionLimit},
+            {"manager_output_executions", manager_output_executions.size()},
+            {"manager_output_execution_limit", ManagerOutputExecutionLimit},
+            {"manager_output_budget_remaining",
+                ManagerOutputExecutionLimit - manager_output_executions.size()},
+            {"manager_recipe_examples", manager_recipe_examples.size()},
+            {"manager_recipe_example_limit", ManagerRecipeExampleLimit},
+            {"manager_recipe_budget_remaining", ManagerRecipeExampleLimit - manager_recipe_examples.size()},
             {"distinct_failures", execution_failures.size()},
             {"distinct_failure_limit", ExecutionFailureLimit}, {"execution_keys", executions.size()},
             {"execution_key_limit", ExecutionLimit}, {"observed_executions", observed_executions},
             {"discarded_executions", discarded_executions}, {"probes", probes.size()},
             {"probe_limit", ProbeLimit}, {"retry_seconds", 30u},
-            {"input_key", "registers vectors gs flags stack fingerprint"},
+            {"input_key", "registers vectors gs flags stack fingerprint array receiver"},
             {"execution_budget_remaining", ExecutionLimit - captured_executions},
             {"array_input_budget_remaining", ArrayInputLimit - array_executions},
             {"distinct_failure_budget_remaining", ExecutionFailureLimit - execution_failures.size()},
             {"additional_execution_capacity", captured_executions < ExecutionLimit}});
+    for (const auto& [receiver, count] : array_receiver_executions)
+        diagnostics::Write("array_receiver_evidence_summary",
+            {{"receiver", diagnostics::Hex(receiver)}, {"executions", count},
+                {"execution_limit", ArrayReceiverExecutionLimit},
+                {"execution_budget_remaining", ArrayReceiverExecutionLimit - count},
+                {"receiver_role_verified", false}});
 }
 }
