@@ -38,7 +38,55 @@ bool Equivalent(const Environment& a, const Environment& b);
 
 bool Finite(skeleton::Point p, float bound = 10000.0f);
 
+enum class ProjectionRejection : std::uint32_t {
+    nonfinite = 1u << 0,
+    axis0_zero = 1u << 1,
+    axis1_zero = 1u << 2,
+    axis2_zero = 1u << 3,
+    axis3_zero = 1u << 4,
+    dot01 = 1u << 5,
+    dot03 = 1u << 6,
+    dot13 = 1u << 7,
+    dot23 = 1u << 8,
+};
+
+struct ProjectionEvidence {
+    std::array<double, 4> lengths{};
+    double dot01{}, dot03{}, dot13{}, dot23{};
+    std::uint32_t rejections{};
+
+    [[nodiscard]] bool Accepted() const noexcept { return rejections == 0; }
+};
+
+ProjectionEvidence InspectProjection(const skeleton::Matrix& view, bool transposed = false) noexcept;
+
+std::optional<std::pair<std::uint64_t, std::uint64_t>> CameraDiagnosticReadBound(
+    const Emulator::Program& code) noexcept;
+
 bool Projection(const skeleton::Matrix& view);
+
+enum class CameraPathOutcome : unsigned {
+    emulation_failed,
+    parent_not_pointer,
+    parent_vtable_read_failed,
+    parent_vtable_outside_image,
+    object_slot_read_failed,
+    object_not_pointer,
+    matrix_read_failed,
+    projection_rejected,
+    camera_disagreed,
+    verified,
+};
+
+struct CameraAttemptEvidence {
+    std::size_t path{};
+    Address teb{}, root{}, manager{}, array{}, parent{}, parent_vtable{}, camera{}, failing_address{};
+    std::int64_t root_path{-1}, manager_path{-1}, array_path{-1};
+    bool parent_vtable_read_complete{}, object_slot_read_complete{};
+    std::optional<skeleton::Matrix> matrix;
+    CameraPathOutcome outcome{};
+    DWORD error{};
+};
 
 struct Reader::Implementation {
     const Memory& process;
@@ -53,9 +101,30 @@ struct Reader::Implementation {
     DWORD last_error = ERROR_SUCCESS;
     RuntimeDiagnostics trace;
     FeatureDiagnostics feature_trace;
-    std::array<std::array<Address, 16>, 2> diagnostic_receivers{};
-    std::array<unsigned, 2> diagnostic_receiver_counts{};
-    std::array<bool, 2> diagnostic_receiver_limit_reported{};
+    static constexpr unsigned diagnostic_receiver_role_count = 4;
+    static constexpr unsigned camera_sample_identity_limit = 16;
+    static constexpr std::uint64_t camera_sample_read_call_limit = 64;
+    static constexpr std::uint64_t camera_sample_read_byte_limit = 1408;
+    static constexpr std::uint64_t camera_metadata_read_call_limit = 4096;
+    static constexpr std::uint64_t camera_metadata_read_byte_limit = 65536;
+    static constexpr unsigned camera_attempt_limit = 1024;
+    std::array<std::array<Address, 16>, diagnostic_receiver_role_count> diagnostic_receivers{};
+    std::array<unsigned, diagnostic_receiver_role_count> diagnostic_receiver_counts{};
+    std::array<bool, diagnostic_receiver_role_count> diagnostic_receiver_limit_reported{};
+    std::array<Address, camera_sample_identity_limit> camera_parent_samples{};
+    std::array<std::pair<Address, Address>, camera_sample_identity_limit> camera_object_samples{};
+    std::array<std::pair<Address, std::array<std::uint32_t, 16>>, camera_sample_identity_limit>
+        camera_matrix_samples{};
+    unsigned camera_parent_sample_count{}, camera_object_sample_count{}, camera_matrix_sample_count{};
+    std::uint64_t camera_sample_read_calls{}, camera_sample_read_bytes{};
+    std::uint64_t camera_metadata_read_calls{}, camera_metadata_read_bytes{};
+    std::set<std::string_view> camera_diagnostic_limits_reported;
+    using CameraAttemptKey = std::tuple<std::uint64_t, Address, Address, Address, Address, std::int64_t,
+        std::int64_t, std::int64_t, std::size_t, CameraPathOutcome, Address, Address, bool, Address, bool,
+        Address, bool, DWORD>;
+    std::set<CameraAttemptKey> camera_attempts;
+    bool camera_attempt_limit_reported{};
+    std::optional<std::uint64_t> camera_screen_state_epoch;
     mutable std::array<std::optional<std::size_t>, 4> reported_paths;
     std::uint32_t tls_index{};
     std::vector<std::pair<Address, Address>> sections;
@@ -201,6 +270,19 @@ struct Reader::Implementation {
 
     void ReportReceiverDiagnostics(
         std::string_view role, std::size_t path, Address teb, Address receiver) noexcept;
+
+    bool ReserveCameraDiagnosticRead(
+        std::string_view category, std::string_view stage, std::uint64_t calls, std::uint64_t bytes) noexcept;
+
+    void ReportCameraDiagnosticBudget(std::string_view category, std::string_view reason,
+        std::uint64_t requested_calls = 0, std::uint64_t requested_bytes = 0) noexcept;
+
+    void ReportCameraDiagnosticLimit(
+        std::string_view category, std::string_view reason, std::uint64_t used, std::uint64_t limit) noexcept;
+
+    void ReportCameraDiagnosticSkip(std::string_view category, std::string_view reason) noexcept;
+
+    void ReportCameraDiagnostics(const CameraAttemptEvidence& attempt) noexcept;
 
     Implementation(const Memory& p, ModuleInfo m, IMAGE_NT_HEADERS64 h, locators::NativeDescriptor n);
 

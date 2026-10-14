@@ -167,41 +167,86 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
     }
     if (selected && (e.manager != selected->manager || e.array != selected->array))
         camera_expression.reset();
-    for (std::size_t index = 0; index < native.cameras.size(); ++index)
+    for (std::size_t index = 0; index < native.cameras.size(); ++index) {
+        if (camera_expression && index != *camera_expression)
+            continue;
+        CameraAttemptEvidence attempt;
+        attempt.path = index;
+        attempt.teb = teb;
+        attempt.root = e.parent;
+        attempt.manager = e.manager;
+        attempt.array = e.array;
+        attempt.root_path = matched_root ? static_cast<std::int64_t>(*matched_root) : -1;
+        attempt.manager_path = matched_manager ? static_cast<std::int64_t>(*matched_manager) : -1;
+        attempt.array_path = matched_array ? static_cast<std::int64_t>(*matched_array) : -1;
+        auto read_failure = CameraPathOutcome::parent_vtable_read_failed;
         try {
-            if (camera_expression && index != *camera_expression)
-                continue;
             const auto& expression = native.cameras[index];
             cpu.Reset(teb);
-            if (!trace.Run(cpu, expression.code, "camera_emulation_failed", index, module.address))
+            if (!trace.Run(cpu, expression.code, "camera_emulation_failed", index, module.address)) {
+                attempt.outcome = CameraPathOutcome::emulation_failed;
+                ReportCameraDiagnostics(attempt);
                 continue;
-            const auto parent = cpu.Get(expression.output);
-            trace.Probe("camera receiver pointer", index, teb, parent, Pointer(parent));
-            if (!Pointer(parent) || !Section(Q(parent))) {
+            }
+            attempt.parent = cpu.Get(expression.output);
+            trace.Probe("camera receiver pointer", index, teb, attempt.parent, Pointer(attempt.parent));
+            if (!Pointer(attempt.parent)) {
                 trace.Count("camera_parent_rejected");
+                attempt.outcome = CameraPathOutcome::parent_not_pointer;
+                ReportCameraDiagnostics(attempt);
                 continue;
             }
-            const auto camera = Q(parent + 0xf00);
-            trace.Probe("camera object pointer", index, parent + 0xf00, camera, Pointer(camera));
-            if (!Pointer(camera)) {
+            attempt.failing_address = attempt.parent;
+            attempt.parent_vtable = Q(attempt.parent);
+            attempt.parent_vtable_read_complete = true;
+            attempt.failing_address = 0;
+            if (!Section(attempt.parent_vtable)) {
+                trace.Count("camera_parent_rejected");
+                attempt.outcome = CameraPathOutcome::parent_vtable_outside_image;
+                ReportCameraDiagnostics(attempt);
+                continue;
+            }
+            read_failure = CameraPathOutcome::object_slot_read_failed;
+            attempt.failing_address = attempt.parent + 0xf00;
+            attempt.camera = Q(attempt.parent + 0xf00);
+            attempt.object_slot_read_complete = true;
+            attempt.failing_address = 0;
+            trace.Probe("camera object pointer", index, attempt.parent + 0xf00, attempt.camera,
+                Pointer(attempt.camera));
+            if (!Pointer(attempt.camera)) {
                 trace.Count("camera_pointer_rejected");
+                attempt.outcome = CameraPathOutcome::object_not_pointer;
+                ReportCameraDiagnostics(attempt);
                 continue;
             }
-            const auto view = Read<skeleton::Matrix>(camera + 0x2c0);
-            if (!Projection(view)) {
+            read_failure = CameraPathOutcome::matrix_read_failed;
+            attempt.failing_address = attempt.camera + 0x2c0;
+            attempt.matrix = Read<skeleton::Matrix>(attempt.camera + 0x2c0);
+            attempt.failing_address = 0;
+            if (!Projection(*attempt.matrix)) {
                 trace.Count("camera_matrix_rejected");
+                attempt.outcome = CameraPathOutcome::projection_rejected;
+                ReportCameraDiagnostics(attempt);
                 continue;
             }
-            if (e.camera && e.camera != camera)
+            if (e.camera && e.camera != attempt.camera) {
+                read_failure = CameraPathOutcome::camera_disagreed;
                 throw ReadFailure{ERROR_DUP_NAME};
+            }
             trace.Count("camera_verified");
-            e.camera = camera;
+            e.camera = attempt.camera;
             matched_camera = index;
+            attempt.outcome = CameraPathOutcome::verified;
+            ReportCameraDiagnostics(attempt);
         } catch (ReadFailure failure) {
+            attempt.outcome = read_failure;
+            attempt.error = failure.error;
+            ReportCameraDiagnostics(attempt);
             trace.Error("camera_path_rejected", failure.error);
             if (failure.error == ERROR_DUP_NAME)
                 throw;
         }
+    }
     if (!e.camera) {
         if (camera_expression) {
             camera_expression.reset();

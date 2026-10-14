@@ -1647,14 +1647,43 @@ std::vector<RigDescriptor> RigLookups(const Emulator::Program& code) {
             for (std::size_t k = j + 3;
                 k + 1 < instructions.size() && instructions[k].address - table.address < 0x100; ++k) {
                 const auto& compare = instructions[k];
-                const auto& branch = instructions[k + 1];
                 if (compare.instruction.mnemonic != ZYDIS_MNEMONIC_CMP ||
                     compare.operands[0].type != ZYDIS_OPERAND_TYPE_MEMORY ||
                     compare.operands[0].mem.base != indexed ||
                     compare.operands[0].mem.index != ZYDIS_REGISTER_NONE ||
                     compare.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
-                    static_cast<std::uint32_t>(compare.operands[1].imm.value.u) != 0xa9cefd4a ||
-                    branch.instruction.mnemonic != ZYDIS_MNEMONIC_JZ ||
+                    static_cast<std::uint32_t>(compare.operands[1].imm.value.u) != 0xa9cefd4a)
+                    continue;
+                std::size_t branch_index = k + 1;
+                for (; branch_index < instructions.size() && branch_index <= k + 4 &&
+                    instructions[branch_index].address - compare.address <= 0x20;
+                    ++branch_index) {
+                    const auto& candidate = instructions[branch_index];
+                    if (candidate.instruction.mnemonic == ZYDIS_MNEMONIC_JZ)
+                        break;
+                    const auto* flags = candidate.instruction.cpu_flags;
+                    bool invalid = candidate.instruction.meta.category == ZYDIS_CATEGORY_CALL ||
+                        candidate.instruction.meta.category == ZYDIS_CATEGORY_COND_BR ||
+                        candidate.instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
+                        candidate.instruction.meta.category == ZYDIS_CATEGORY_RET ||
+                        (flags &&
+                            (flags->tested | flags->modified | flags->set_0 | flags->set_1 |
+                                flags->undefined));
+                    for (unsigned operand = 0; operand < candidate.instruction.operand_count; ++operand) {
+                        const auto& value = candidate.operands[operand];
+                        invalid |= (value.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+                            ((value.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                                 (Dependency(value.reg.value) & Dependency(indexed))) ||
+                                value.type == ZYDIS_OPERAND_TYPE_MEMORY);
+                    }
+                    if (invalid)
+                        break;
+                }
+                if (branch_index >= instructions.size() || branch_index > k + 4 ||
+                    instructions[branch_index].address - compare.address > 0x20)
+                    continue;
+                const auto& branch = instructions[branch_index];
+                if (branch.instruction.mnemonic != ZYDIS_MNEMONIC_JZ ||
                     branch.operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
                     !branch.operands[0].imm.is_relative)
                     continue;

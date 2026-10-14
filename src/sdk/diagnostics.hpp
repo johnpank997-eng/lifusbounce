@@ -47,7 +47,7 @@ struct RuntimeDiagnostics {
                               ArrayReceiverLimit = 16, ArrayReceiverExecutionLimit = 12,
                               ManagerOutputExecutionLimit = 32, ManagerRecipeExampleLimit = 128,
                               ArrayRecipeExampleLimit = 128, DiscardedRetryLimit = 4096,
-                              ArrayEntryExampleLimit = 128;
+                              ArrayEntryExampleLimit = 128, CameraExecutionReserve = 16;
     std::map<std::string_view, std::uint64_t> counters;
     std::set<std::tuple<std::string_view, std::size_t, unsigned, std::uint64_t>> examples;
     using ExecutionKey = std::tuple<std::string_view, std::size_t, std::uint64_t, std::uint64_t,

@@ -91,6 +91,8 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
     Emulator::State before{};
     std::uint64_t manager_before{};
     const bool receiver_array = stage == "array_emulation_failed" && array_receiver != 0;
+    const bool camera_metadata =
+        stage == "camera_parent_metadata_decode" || stage == "camera_object_metadata_decode";
     const bool manager_hint = stage == "manager_emulation_failed" && manager_output >= ZYDIS_REGISTER_RAX &&
         manager_output <= ZYDIS_REGISTER_R15 && manager_output != ZYDIS_REGISTER_RSP;
     const ManagerRecipeKey manager_recipe{stage, index, code.begin, code.end};
@@ -113,8 +115,17 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
         const auto samples = execution_samples.find(stage);
         const bool stage_capacity =
             samples == execution_samples.end() || samples->second < StageExecutionLimit;
+        const auto camera_parent = execution_samples.find("camera_parent_metadata_decode");
+        const auto camera_object = execution_samples.find("camera_object_metadata_decode");
+        const auto camera_executions =
+            (camera_parent == execution_samples.end() ? 0u : camera_parent->second) +
+            (camera_object == execution_samples.end() ? 0u : camera_object->second);
+        const auto ordinary_executions = captured_executions - camera_executions;
         const auto now = std::chrono::steady_clock::now();
-        if (diagnostics::Enabled() && captured_executions < ExecutionLimit &&
+        const bool execution_capacity = captured_executions < ExecutionLimit &&
+            (camera_metadata ? stage_capacity
+                             : ordinary_executions < ExecutionLimit - CameraExecutionReserve);
+        if (diagnostics::Enabled() && execution_capacity &&
             (now >= discarded_retry_at || stage_capacity || manager_recipe_first || array_recipe_first) &&
             (!receiver_array || array_normal_capacity || array_priority) &&
             (stage_capacity || !successful_stages.contains(stage) ||

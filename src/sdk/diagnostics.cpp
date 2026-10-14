@@ -456,6 +456,14 @@ void RuntimeDiagnostics::Report() const noexcept {
     };
     for (const auto& [name, count] : counters)
         diagnostics::Write("runtime_counter", {{"reason", name}, {"count", count}});
+    const auto camera_parent = execution_samples.find("camera_parent_metadata_decode");
+    const auto camera_object = execution_samples.find("camera_object_metadata_decode");
+    const auto camera_executions = (camera_parent == execution_samples.end() ? 0u : camera_parent->second) +
+        (camera_object == execution_samples.end() ? 0u : camera_object->second);
+    const auto ordinary_executions = captured_executions - camera_executions;
+    const auto additional_execution_capacity = captured_executions < ExecutionLimit &&
+        (ordinary_executions < ExecutionLimit - CameraExecutionReserve ||
+            camera_executions < CameraExecutionReserve);
     diagnostics::Write("runtime_evidence_summary",
         {{"executions", captured_executions}, {"execution_limit", ExecutionLimit},
             {"reads_per_execution_limit", ReadLimit}, {"stage_execution_limit", StageExecutionLimit},
@@ -491,10 +499,17 @@ void RuntimeDiagnostics::Report() const noexcept {
             {"probe_limit", ProbeLimit}, {"retry_seconds", 30u},
             {"input_key", "registers vectors gs flags stack fingerprint array receiver"},
             {"execution_budget_remaining", remaining(ExecutionLimit, captured_executions)},
+            {"ordinary_executions", ordinary_executions},
+            {"ordinary_execution_limit", ExecutionLimit - CameraExecutionReserve},
+            {"ordinary_execution_budget_remaining",
+                remaining(ExecutionLimit - CameraExecutionReserve, ordinary_executions)},
+            {"camera_execution_reserve", CameraExecutionReserve},
+            {"camera_metadata_executions", camera_executions},
+            {"camera_execution_budget_remaining", remaining(CameraExecutionReserve, camera_executions)},
             {"array_input_budget_remaining", remaining(ArrayInputLimit, array_executions)},
             {"distinct_failure_budget_remaining",
                 remaining(ExecutionFailureLimit, execution_failures.size())},
-            {"additional_execution_capacity", captured_executions < ExecutionLimit}});
+            {"additional_execution_capacity", additional_execution_capacity}});
     for (const auto& [receiver, count] : array_receiver_executions) {
         const auto priority = array_receiver_priority_executions.find(receiver);
         const auto priority_count =

@@ -14,23 +14,41 @@ bool Finite(skeleton::Point p, float bound) {
         std::abs(p.y) <= bound && std::abs(p.z) <= bound;
 }
 
-bool Projection(const skeleton::Matrix& view) {
-    if (!std::all_of(view.begin(), view.end(), [](float v) { return std::isfinite(v); }))
-        return false;
+ProjectionEvidence InspectProjection(const skeleton::Matrix& view, bool transposed) noexcept {
+    ProjectionEvidence result;
+    if (!std::all_of(view.begin(), view.end(), [](float value) { return std::isfinite(value); }))
+        result.rejections |= static_cast<std::uint32_t>(ProjectionRejection::nonfinite);
     std::array<std::array<double, 3>, 4> axes{};
-    std::array<double, 4> length{};
     for (unsigned i = 0; i < 4; ++i) {
-        axes[i] = {view[i], view[i + 4], view[i + 8]};
-        length[i] = std::hypot(axes[i][0], axes[i][1], axes[i][2]);
-        if (length[i] == 0)
-            return false;
+        axes[i] = transposed ? std::array<double, 3>{view[i * 4], view[i * 4 + 1], view[i * 4 + 2]}
+                             : std::array<double, 3>{view[i], view[i + 4], view[i + 8]};
+        result.lengths[i] = std::hypot(axes[i][0], axes[i][1], axes[i][2]);
+        if (result.lengths[i] == 0)
+            result.rejections |= static_cast<std::uint32_t>(ProjectionRejection::axis0_zero) << i;
     }
     const auto dot = [&](unsigned a, unsigned b) {
+        if (result.lengths[a] == 0 || result.lengths[b] == 0)
+            return std::numeric_limits<double>::quiet_NaN();
         return (axes[a][0] * axes[b][0] + axes[a][1] * axes[b][1] + axes[a][2] * axes[b][2]) /
-            (length[a] * length[b]);
+            (result.lengths[a] * result.lengths[b]);
     };
-    return std::abs(dot(0, 1)) < 0.001 && std::abs(dot(0, 3)) < 0.01 && std::abs(dot(1, 3)) < 0.01 &&
-        std::abs(dot(2, 3)) > 0.999;
+    result.dot01 = dot(0, 1);
+    result.dot03 = dot(0, 3);
+    result.dot13 = dot(1, 3);
+    result.dot23 = dot(2, 3);
+    if (std::isfinite(result.dot01) && std::abs(result.dot01) >= 0.001)
+        result.rejections |= static_cast<std::uint32_t>(ProjectionRejection::dot01);
+    if (std::isfinite(result.dot03) && std::abs(result.dot03) >= 0.01)
+        result.rejections |= static_cast<std::uint32_t>(ProjectionRejection::dot03);
+    if (std::isfinite(result.dot13) && std::abs(result.dot13) >= 0.01)
+        result.rejections |= static_cast<std::uint32_t>(ProjectionRejection::dot13);
+    if (std::isfinite(result.dot23) && std::abs(result.dot23) <= 0.999)
+        result.rejections |= static_cast<std::uint32_t>(ProjectionRejection::dot23);
+    return result;
+}
+
+bool Projection(const skeleton::Matrix& view) {
+    return InspectProjection(view).Accepted();
 }
 
 auto Reader::Implementation::Q(Address at) -> Address {
