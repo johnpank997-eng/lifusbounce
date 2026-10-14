@@ -1740,7 +1740,7 @@ std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code, const NativeR
             Dependency(operand.reg.value) &&
             ZydisRegisterGetWidth(ZYDIS_MACHINE_MODE_LONG_64, operand.reg.value) == bits;
     };
-    for (std::size_t j = 8; j < instructions.size(); ++j) {
+    for (std::size_t j = 7; j < instructions.size(); ++j) {
         const auto& jump = instructions[j];
         if (jump.instruction.meta.category != ZYDIS_CATEGORY_UNCOND_BR ||
             !register_width(jump.operands[0], 64) || jump.instruction.address_width != 64)
@@ -1748,23 +1748,28 @@ std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code, const NativeR
         const auto& saved = instructions[j - 4];
         const bool preservation = saved.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
             register_width(saved.operands[0], 64) && register_width(saved.operands[1], 64);
-        if (preservation && j < 9)
+        if (preservation && j < 8)
             continue;
-        const auto first_index = j - (preservation ? 9 : 8);
+        const bool shifted = j >= (preservation ? 9u : 8u) &&
+            instructions[j - (preservation ? 9u : 8u) + 1].instruction.mnemonic == ZYDIS_MNEMONIC_SHR;
+        const auto first_index = j - (shifted ? (preservation ? 9 : 8) : (preservation ? 8 : 7));
         const auto& move = instructions[first_index];
         const auto& shift = instructions[first_index + 1];
-        const auto& mask = instructions[first_index + 2];
-        const auto& bound = instructions[first_index + 3];
-        const auto& exit = instructions[first_index + 4];
+        const auto& mask = instructions[first_index + (shifted ? 2 : 1)];
+        const auto& bound = instructions[first_index + (shifted ? 3 : 2)];
+        const auto& exit = instructions[first_index + (shifted ? 4 : 3)];
         const auto& table = instructions[j - 3];
         const auto& load = instructions[j - 2];
         const auto& add = instructions[j - 1];
         const auto index = move.operands[0].reg.value;
         const auto target = jump.operands[0].reg.value;
         if (move.instruction.mnemonic != ZYDIS_MNEMONIC_MOV || !register_width(move.operands[0], 32) ||
-            !register_width(move.operands[1], 32) || shift.instruction.mnemonic != ZYDIS_MNEMONIC_SHR ||
-            !register_width(shift.operands[0], 32) || shift.operands[0].reg.value != index ||
-            shift.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || shift.operands[1].imm.value.u >= 32 ||
+            !register_width(move.operands[1], 32) ||
+            (shifted &&
+                (shift.instruction.mnemonic != ZYDIS_MNEMONIC_SHR || !register_width(shift.operands[0], 32) ||
+                    shift.operands[0].reg.value != index ||
+                    shift.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+                    shift.operands[1].imm.value.u >= 32)) ||
             mask.instruction.mnemonic != ZYDIS_MNEMONIC_AND || !register_width(mask.operands[0], 32) ||
             mask.operands[0].reg.value != index || mask.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
             bound.instruction.mnemonic != ZYDIS_MNEMONIC_CMP || !register_width(bound.operands[0], 32) ||
@@ -1875,7 +1880,8 @@ std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code, const NativeR
                 unclosed_control_flow = true;
         }
     }
-    const auto indexed_pair = [&](std::size_t write, std::int64_t pair, bool strict = false) {
+    const auto indexed_pair = [&](std::size_t write, std::int64_t pair, bool strict = false,
+                                  std::size_t* initialization = nullptr) {
         const auto& destination = instructions[write].operands[0];
         if (destination.type != ZYDIS_OPERAND_TYPE_MEMORY || destination.mem.base != ZYDIS_REGISTER_RSP ||
             destination.mem.scale != 1 || destination.mem.disp.value != pair ||
@@ -2093,8 +2099,11 @@ std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code, const NativeR
                     safe &= k == j + 2 || skip;
                 }
             }
-            if (safe && step)
+            if (safe && step) {
+                if (initialization)
+                    *initialization = *zero;
                 return true;
+            }
         }
         return false;
     };
@@ -3066,6 +3075,504 @@ std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code, const NativeR
             value.code.instructions.erase(value.code.instructions.begin(), start);
         }
         result.push_back(std::move(value));
+    }
+    if (!result.empty())
+        return result;
+    const auto fallback_flat = [](const Emulator::Decoded& d, const ZydisDecodedOperand& operand) {
+        return d.instruction.address_width == 64 && operand.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+            operand.mem.type == ZYDIS_MEMOP_TYPE_MEM &&
+            (operand.mem.segment == ZYDIS_REGISTER_DS || operand.mem.segment == ZYDIS_REGISTER_SS);
+    };
+    bool fallback_mask{}, fallback_load{}, fallback_copy{};
+    for (const auto& d : instructions) {
+        const auto& destination = d.operands[0];
+        const auto& source = d.operands[1];
+        fallback_mask |= d.instruction.mnemonic == ZYDIS_MNEMONIC_AND && register_width(destination, 32) &&
+            source.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && source.imm.value.u == 0x3fffffff;
+        fallback_load |= d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && register_width(destination, 64) &&
+            fallback_flat(d, source) && source.size == 64 && LocalSlot(source) &&
+            source.mem.disp.value >= 8 && source.mem.disp.value <= 0x7000;
+        fallback_copy |= d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && register_width(source, 64) &&
+            fallback_flat(d, destination) && destination.size == 64 &&
+            destination.mem.base == ZYDIS_REGISTER_RSP && destination.mem.index != ZYDIS_REGISTER_NONE &&
+            destination.mem.scale == 1;
+    }
+    if (!fallback_mask || !fallback_load || !fallback_copy)
+        return result;
+    std::vector<std::vector<std::size_t>> fallback_successors(instructions.size());
+    std::vector<std::vector<std::size_t>> fallback_predecessors(instructions.size());
+    std::vector<bool> fallback_unresolved(instructions.size());
+    for (std::size_t at = 0; at < instructions.size(); ++at) {
+        const auto& d = instructions[at];
+        const auto category = d.instruction.meta.category;
+        if (category != ZYDIS_CATEGORY_RET && category != ZYDIS_CATEGORY_UNCOND_BR) {
+            if (at + 1 < instructions.size() &&
+                instructions[at + 1].address == d.address + d.instruction.length)
+                fallback_successors[at].push_back(at + 1);
+            else
+                fallback_unresolved[at] = true;
+        }
+        const auto push_target = [&](std::uint64_t target) {
+            const auto found = std::lower_bound(instructions.begin(), instructions.end(), target,
+                [](const auto& value, auto address) { return value.address < address; });
+            if (found != instructions.end() && found->address == target)
+                fallback_successors[at].push_back(static_cast<std::size_t>(found - instructions.begin()));
+            else
+                fallback_unresolved[at] = true;
+        };
+        if (category == ZYDIS_CATEGORY_UNCOND_BR || category == ZYDIS_CATEGORY_COND_BR) {
+            const auto& operand = d.operands[0];
+            if (operand.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && operand.imm.is_relative)
+                push_target(d.address + d.instruction.length + operand.imm.value.s);
+            else if (const auto found = branches.find(d.address); found != branches.end())
+                for (auto target : found->second)
+                    push_target(target);
+            else
+                fallback_unresolved[at] = true;
+        }
+    }
+    for (std::size_t at = 0; at < instructions.size(); ++at)
+        for (auto next : fallback_successors[at])
+            fallback_predecessors[next].push_back(at);
+    const auto fallback_dominates = [&](std::size_t definition, std::size_t target) {
+        std::vector<bool> seen(instructions.size());
+        std::vector<std::size_t> work{0};
+        while (!work.empty()) {
+            const auto at = work.back();
+            work.pop_back();
+            if (at == definition || seen[at])
+                continue;
+            if (at == target)
+                return false;
+            seen[at] = true;
+            work.insert(work.end(), fallback_successors[at].begin(), fallback_successors[at].end());
+        }
+        return true;
+    };
+    for (std::size_t consumer = 0; consumer < instructions.size(); ++consumer) {
+        const auto& mask = instructions[consumer];
+        if (mask.instruction.mnemonic != ZYDIS_MNEMONIC_AND || !register_width(mask.operands[0], 32) ||
+            mask.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+            mask.operands[1].imm.value.u != 0x3fffffff || !function_reachable[consumer])
+            continue;
+        auto tracked = Dependency(mask.operands[0].reg.value);
+        auto load_index = consumer;
+        for (auto at = consumer; at && consumer - at < 8; --at) {
+            const auto& d = instructions[at - 1];
+            if (d.instruction.meta.category == ZYDIS_CATEGORY_CALL ||
+                d.instruction.meta.category == ZYDIS_CATEGORY_RET ||
+                d.instruction.meta.category == ZYDIS_CATEGORY_COND_BR ||
+                d.instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR)
+                break;
+            if (d.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                !(d.operands[0].actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) ||
+                Dependency(d.operands[0].reg.value) != tracked)
+                continue;
+            if (d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV)
+                break;
+            if (register_width(d.operands[0], 64) && fallback_flat(d, d.operands[1]) &&
+                LocalSlot(d.operands[1]) && d.operands[1].size == 64 && d.operands[1].mem.disp.value >= 8 &&
+                d.operands[1].mem.disp.value <= 0x7000) {
+                load_index = at - 1;
+                break;
+            }
+            if (d.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER || d.operands[1].size < 32)
+                break;
+            tracked = Dependency(d.operands[1].reg.value);
+        }
+        if (load_index == consumer || load_index + 1 >= instructions.size())
+            continue;
+        const auto& count_load = instructions[load_index];
+        const auto pair = count_load.operands[1].mem.disp.value - 8;
+        using FallbackRoles = std::array<unsigned char, 16>;
+
+        struct FallbackPath {
+            std::size_t at;
+            FallbackRoles roles;
+            std::vector<std::size_t> visited;
+            bool masked;
+            bool capacity_guard;
+            bool maximum_guard;
+            unsigned comparison;
+        };
+
+        FallbackRoles initial{};
+        initial[std::countr_zero(Dependency(count_load.operands[0].reg.value))] = 1;
+        std::vector<FallbackPath> role_pending{{load_index + 1, initial, {}, false, false, false, 0}};
+        std::vector<std::size_t> append_witness;
+        unsigned path_steps{};
+        while (!role_pending.empty() && path_steps++ < 512 && append_witness.empty()) {
+            auto path = std::move(role_pending.back());
+            role_pending.pop_back();
+            const auto at = path.at;
+            if (at >= instructions.size() || path.visited.size() >= 64 ||
+                std::find(path.visited.begin(), path.visited.end(), at) != path.visited.end())
+                continue;
+            const auto& d = instructions[at];
+            const auto category = d.instruction.meta.category;
+            if (category == ZYDIS_CATEGORY_CALL || category == ZYDIS_CATEGORY_RET || fallback_unresolved[at])
+                continue;
+            const auto old = path.roles;
+            auto next = old;
+            const auto role = [&](ZydisRegister reg) {
+                const auto bit = Dependency(reg);
+                return bit ? old[std::countr_zero(bit)] : 0;
+            };
+            const auto& store_target = d.operands[0];
+            const auto base_bit =
+                store_target.type == ZYDIS_OPERAND_TYPE_MEMORY ? Dependency(store_target.mem.base) : 0;
+            const auto index_bit =
+                store_target.type == ZYDIS_OPERAND_TYPE_MEMORY ? Dependency(store_target.mem.index) : 0;
+            if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && fallback_flat(d, store_target) &&
+                store_target.size == 64 && store_target.mem.scale == 1 && !store_target.mem.disp.value &&
+                register_width(d.operands[1], 64) && path.masked && path.capacity_guard &&
+                path.maximum_guard && base_bit && index_bit && old[std::countr_zero(base_bit)] == 2 &&
+                old[std::countr_zero(index_bit)] == 3 && fallback_dominates(load_index, at)) {
+                append_witness = path.visited;
+                append_witness.push_back(at);
+                break;
+            }
+            bool stable = true;
+            for (unsigned operand = 0; operand < d.instruction.operand_count; ++operand) {
+                const auto& written = d.operands[operand];
+                if (!(written.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE))
+                    continue;
+                if (written.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                    (Dependency(written.reg.value) & Dependency(ZYDIS_REGISTER_RSP)))
+                    stable = false;
+                if (written.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                    (!fallback_flat(d, written) || written.mem.base != ZYDIS_REGISTER_RSP ||
+                        written.mem.index != ZYDIS_REGISTER_NONE || !written.size || (written.size & 7) ||
+                        (written.mem.disp.value < pair + 8 &&
+                            written.mem.disp.value + written.size / 8 > pair)))
+                    stable = false;
+            }
+            if (!stable)
+                continue;
+            path.masked |= at == consumer;
+            for (unsigned operand = 0; operand < d.instruction.operand_count; ++operand) {
+                const auto& destination = d.operands[operand];
+                if (destination.type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                    !(destination.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) ||
+                    !Dependency(destination.reg.value))
+                    continue;
+                unsigned char value{};
+                if (operand == 0 && destination.size >= 32) {
+                    const auto& source = d.operands[1];
+                    if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                        source.type == ZYDIS_OPERAND_TYPE_REGISTER && source.size >= 32) {
+                        const auto source_role = role(source.reg.value);
+                        if (source_role != 2 || (source.size == 64 && destination.size == 64))
+                            value = source_role == 1 && (source.size == 32 || destination.size == 32)
+                                ? 7
+                                : static_cast<unsigned char>(source_role);
+                    }
+                    if (d.instruction.mnemonic == ZYDIS_MNEMONIC_AND && destination.size == 32 &&
+                        source.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && source.imm.value.u == 0x3fffffff) {
+                        const auto prior = role(destination.reg.value);
+                        if (prior == 1 || prior == 7)
+                            value = 5;
+                        if (prior == 4)
+                            value = 6;
+                    }
+                    if (d.instruction.mnemonic == ZYDIS_MNEMONIC_SHR && role(destination.reg.value) == 1 &&
+                        destination.size == 64 && source.type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
+                        source.imm.value.u == 32)
+                        value = 4;
+                    if (d.instruction.mnemonic == ZYDIS_MNEMONIC_SHL &&
+                        (role(destination.reg.value) == 1 || role(destination.reg.value) == 5 ||
+                            role(destination.reg.value) == 7) &&
+                        destination.size == 32 && source.type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
+                        source.imm.value.u == 3)
+                        value = 3;
+                    if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && destination.size == 64 &&
+                        fallback_flat(d, source) && source.size == 64 && LocalSlot(source) &&
+                        source.mem.disp.value == pair)
+                        value = 2;
+                }
+                if ((destination.actions & ZYDIS_OPERAND_ACTION_CONDWRITE) &&
+                    role(destination.reg.value) != value)
+                    value = 0;
+                next[std::countr_zero(Dependency(destination.reg.value))] = value;
+            }
+            const auto flags = d.instruction.cpu_flags;
+            if (flags && (flags->modified | flags->set_0 | flags->set_1 | flags->undefined))
+                path.comparison = 0;
+            if (d.instruction.mnemonic == ZYDIS_MNEMONIC_CMP && register_width(d.operands[0], 32) && flags &&
+                (flags->modified & (ZYDIS_CPUFLAG_CF | ZYDIS_CPUFLAG_ZF)) ==
+                    (ZYDIS_CPUFLAG_CF | ZYDIS_CPUFLAG_ZF) &&
+                !(flags->undefined & (ZYDIS_CPUFLAG_CF | ZYDIS_CPUFLAG_ZF))) {
+                if (!path.capacity_guard && role(d.operands[0].reg.value) == 5 &&
+                    register_width(d.operands[1], 32) && role(d.operands[1].reg.value) == 6)
+                    path.comparison = 1;
+                if (path.capacity_guard && role(d.operands[0].reg.value) == 5 &&
+                    d.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
+                    d.operands[1].imm.value.u == 0x3fffffff)
+                    path.comparison = 2;
+            }
+            path.visited.push_back(at);
+            if (category == ZYDIS_CATEGORY_COND_BR) {
+                const auto& target = d.operands[0];
+                if (target.type != ZYDIS_OPERAND_TYPE_IMMEDIATE || !target.imm.is_relative)
+                    continue;
+                std::uint64_t selected{};
+                if (!path.capacity_guard && path.comparison == 1 &&
+                    d.instruction.mnemonic == ZYDIS_MNEMONIC_JB && flags &&
+                    (flags->tested & ZYDIS_CPUFLAG_CF)) {
+                    path.capacity_guard = true;
+                    selected = d.address + d.instruction.length + target.imm.value.s;
+                } else if (path.capacity_guard && !path.maximum_guard && path.comparison == 2 &&
+                    d.instruction.mnemonic == ZYDIS_MNEMONIC_JZ && flags &&
+                    (flags->tested & ZYDIS_CPUFLAG_ZF)) {
+                    path.maximum_guard = true;
+                    selected = d.address + d.instruction.length;
+                } else
+                    continue;
+                path.comparison = 0;
+                for (auto to : fallback_successors[at])
+                    if (instructions[to].address == selected)
+                        role_pending.push_back({to, next, path.visited, path.masked, path.capacity_guard,
+                            path.maximum_guard, path.comparison});
+            } else
+                for (auto to : fallback_successors[at])
+                    role_pending.push_back({to, next, path.visited, path.masked, path.capacity_guard,
+                        path.maximum_guard, path.comparison});
+        }
+        if (append_witness.empty()) {
+            continue;
+        }
+        std::optional<std::size_t> begin;
+        ZydisRegister input = ZYDIS_REGISTER_NONE;
+        for (auto at = load_index; at && count_load.address - instructions[at - 1].address < 0x1000; --at) {
+            const auto& store = instructions[at - 1];
+            const auto& destination = store.operands[0];
+            if (store.instruction.mnemonic != ZYDIS_MNEMONIC_MOV || !fallback_flat(store, destination) ||
+                destination.mem.base != ZYDIS_REGISTER_RSP || destination.mem.index == ZYDIS_REGISTER_NONE ||
+                destination.mem.disp.value != pair || destination.size != 64 ||
+                !register_width(store.operands[1], 64))
+                continue;
+            std::size_t initialization{};
+            if (!indexed_pair(at - 1, pair, true, &initialization))
+                continue;
+            for (auto before = at - 1; before && at - before < 8; --before) {
+                const auto& source = instructions[before - 1];
+                const auto& member = source.operands[1];
+                if (source.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                    source.operands[0].reg.value == store.operands[1].reg.value &&
+                    fallback_flat(source, member) && member.size == 64 &&
+                    register_width(source.operands[0], 64) && member.mem.base != ZYDIS_REGISTER_RSP &&
+                    Dependency(member.mem.base) && member.mem.scale == 1 &&
+                    ZydisRegisterGetWidth(ZYDIS_MACHINE_MODE_LONG_64, member.mem.base) == 64 &&
+                    member.mem.index == destination.mem.index && member.mem.disp.value > 0 &&
+                    member.mem.disp.value < 0x10000) {
+                    bool survives = true;
+                    const auto data = Dependency(source.operands[0].reg.value);
+                    const auto address = Dependency(member.mem.base) | Dependency(member.mem.index) |
+                        Dependency(ZYDIS_REGISTER_RSP);
+                    if (data & address)
+                        continue;
+                    for (auto between = before; between < at - 1 && survives; ++between) {
+                        const auto& operation = instructions[between];
+                        const auto category = operation.instruction.meta.category;
+                        if (category == ZYDIS_CATEGORY_CALL || category == ZYDIS_CATEGORY_RET ||
+                            category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR)
+                            survives = false;
+                        for (unsigned operand = 0; operand < operation.instruction.operand_count; ++operand) {
+                            const auto& written = operation.operands[operand];
+                            if (written.type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                                !(written.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE))
+                                continue;
+                            if (Dependency(written.reg.value) & address)
+                                survives = false;
+                            if (!(Dependency(written.reg.value) & data))
+                                continue;
+                            const auto& key = operation.operands[1];
+                            if (operand != 0 || operation.instruction.mnemonic != ZYDIS_MNEMONIC_XOR ||
+                                !register_width(written, 64) ||
+                                !(written.actions & ZYDIS_OPERAND_ACTION_MASK_READ) ||
+                                (key.type != ZYDIS_OPERAND_TYPE_IMMEDIATE &&
+                                    (!register_width(key, 64) || (Dependency(key.reg.value) & data))))
+                                survives = false;
+                        }
+                    }
+                    if (!survives)
+                        continue;
+                    input = member.mem.base;
+                    begin = initialization;
+                    break;
+                }
+            }
+            if (begin)
+                break;
+        }
+        if (!begin) {
+            continue;
+        }
+        while (*begin && count_load.address - instructions[*begin - 1].address < 0x1000) {
+            const auto& previous = instructions[*begin - 1];
+            const auto category = previous.instruction.meta.category;
+            if (category == ZYDIS_CATEGORY_CALL || category == ZYDIS_CATEGORY_RET ||
+                category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR)
+                break;
+            --*begin;
+        }
+        const auto caller = CallerSlot(code, *begin, resolve, &branches);
+        if (!caller) {
+            continue;
+        }
+        bool protected_caller = true;
+        for (std::size_t at = 0; at < *begin && protected_caller; ++at) {
+            if (!function_reachable[at])
+                continue;
+            const auto& d = instructions[at];
+            for (unsigned operand = 0; operand < d.instruction.operand_count_visible; ++operand) {
+                const auto& destination = d.operands[operand];
+                if (destination.type != ZYDIS_OPERAND_TYPE_MEMORY ||
+                    !(destination.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) ||
+                    !(Dependency(destination.mem.base) & Dependency(ZYDIS_REGISTER_RSP)))
+                    continue;
+                const auto depth = CallerSlot(code, at, resolve, &branches, true);
+                if (!depth || !fallback_flat(d, destination) || destination.mem.base != ZYDIS_REGISTER_RSP ||
+                    !destination.size || (destination.size & 7)) {
+                    protected_caller = false;
+                    break;
+                }
+                const auto offset = destination.mem.disp.value;
+                if (destination.mem.index != ZYDIS_REGISTER_NONE) {
+                    if (destination.mem.scale != 1 || !indexed_pair(at, offset, true) ||
+                        (offset < *depth + 8 && offset + 16 > *depth)) {
+                        protected_caller = false;
+                        break;
+                    }
+                } else if (offset < *depth + 8 && offset + destination.size / 8 > *depth) {
+                    protected_caller = false;
+                    break;
+                }
+            }
+        }
+        if (!protected_caller) {
+            continue;
+        }
+        std::vector<bool> fallback_ancestor(instructions.size());
+        std::vector<std::size_t> ancestor_pending{*begin};
+        while (!ancestor_pending.empty()) {
+            const auto at = ancestor_pending.back();
+            ancestor_pending.pop_back();
+            if (fallback_ancestor[at])
+                continue;
+            fallback_ancestor[at] = true;
+            ancestor_pending.insert(
+                ancestor_pending.end(), fallback_predecessors[at].begin(), fallback_predecessors[at].end());
+        }
+        bool ancestor_closed = true;
+        for (std::size_t at = 0; at < instructions.size(); ++at)
+            if (function_reachable[at] && fallback_ancestor[at] && fallback_unresolved[at])
+                ancestor_closed = false;
+        if (!ancestor_closed) {
+            continue;
+        }
+        Emulator::Program value{instructions[*begin].address,
+            instructions[load_index + 1].address + instructions[load_index + 1].instruction.length,
+            {instructions.begin() + *begin, instructions.begin() + load_index}};
+        bool safe = true;
+        for (auto at = *begin; at < load_index; ++at) {
+            auto& d = value.instructions[at - *begin];
+            const auto category = d.instruction.meta.category;
+            if (category == ZYDIS_CATEGORY_CALL || category == ZYDIS_CATEGORY_RET || fallback_unresolved[at])
+                safe = false;
+            for (auto next : fallback_successors[at])
+                if (next < *begin || next > load_index)
+                    safe = false;
+            for (unsigned operand = 0; operand < d.instruction.operand_count; ++operand) {
+                const auto& o = d.operands[operand];
+                if (o.type == ZYDIS_OPERAND_TYPE_REGISTER && (o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+                    (Dependency(o.reg.value) & Dependency(input)))
+                    safe = false;
+                if (o.type != ZYDIS_OPERAND_TYPE_MEMORY || !(o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) ||
+                    o.mem.base == ZYDIS_REGISTER_RSP)
+                    continue;
+                if (!ownership_update(at))
+                    safe = false;
+                else {
+                    d.instruction.mnemonic = ZYDIS_MNEMONIC_NOP;
+                    d.instruction.operand_count = d.instruction.operand_count_visible = 0;
+                    d.instruction.cpu_flags = nullptr;
+                    d.operands = {};
+                }
+            }
+        }
+        if (!safe) {
+            continue;
+        }
+        auto pointer = count_load;
+        pointer.operands[0].reg.value = ZYDIS_REGISTER_RDX;
+        pointer.operands[1].mem.disp.value = pair;
+        value.instructions.push_back(pointer);
+        auto size = count_load;
+        size.address = instructions[load_index + 1].address;
+        size.instruction.length = instructions[load_index + 1].instruction.length;
+        size.operands[0].reg.value = ZYDIS_REGISTER_RAX;
+        value.instructions.push_back(size);
+        value = Simplify(value);
+        std::uint32_t external{};
+        std::set<std::int64_t> slots;
+        auto pruned = PruneArray(value, input, ZYDIS_REGISTER_RDX, ZYDIS_REGISTER_RAX, pair,
+            static_cast<std::uint32_t>(*caller), true, &external, &slots);
+        if (!pruned && std::popcount(external) + slots.size() <= 8) {
+            std::vector<Emulator::Decoded> definitions;
+            const auto add_seed = [&](Location location) {
+                const auto expression =
+                    Trace(code, *begin, location, Location{ZYDIS_REGISTER_NONE, *caller, true}, &branches);
+                if (!expression || expression->inputs)
+                    return false;
+                for (const auto& d : expression->code.instructions) {
+                    bool frame{};
+                    for (unsigned operand = 0; operand < d.instruction.operand_count; ++operand) {
+                        const auto& o = d.operands[operand];
+                        frame |= (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == ZYDIS_REGISTER_RSP) ||
+                            (o.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                                (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ) &&
+                                (Dependency(o.reg.value) & Dependency(ZYDIS_REGISTER_RSP)));
+                    }
+                    const auto at = std::lower_bound(instructions.begin(), instructions.end(), d.address,
+                        [](const auto& instruction, auto address) { return instruction.address < address; });
+                    if (at == instructions.end() || at->address != d.address)
+                        return false;
+                    const auto definition = static_cast<std::size_t>(at - instructions.begin());
+                    if ((frame && CallerSlot(code, definition, resolve, &branches) != caller) ||
+                        (definition < *begin && !fallback_dominates(definition, *begin)))
+                        return false;
+                }
+                definitions.insert(definitions.end(), expression->code.instructions.begin(),
+                    expression->code.instructions.end());
+                return true;
+            };
+            bool complete = true;
+            for (unsigned reg = 0; reg < 16 && complete; ++reg)
+                if (external & (1u << reg))
+                    complete =
+                        add_seed({ZydisRegisterEncode(ZYDIS_REGCLASS_GPR64, static_cast<ZyanU8>(reg))});
+            for (auto slot : slots)
+                complete &= add_seed({ZYDIS_REGISTER_NONE, slot, true});
+            if (complete && !definitions.empty()) {
+                definitions.insert(definitions.end(), value.instructions.begin(), value.instructions.end());
+                std::sort(definitions.begin(), definitions.end(),
+                    [](const auto& a, const auto& b) { return a.address < b.address; });
+                definitions.erase(std::unique(definitions.begin(), definitions.end(),
+                                      [](const auto& a, const auto& b) { return a.address == b.address; }),
+                    definitions.end());
+                value.instructions = std::move(definitions);
+                value.begin = value.instructions.front().address;
+                value.sparse = true;
+                pruned = PruneArray(value, input, ZYDIS_REGISTER_RDX, ZYDIS_REGISTER_RAX, pair,
+                    static_cast<std::uint32_t>(*caller), true);
+            }
+        }
+        if (!pruned) {
+            continue;
+        }
+        result.push_back({std::move(*pruned), input, ZYDIS_REGISTER_RDX, ZYDIS_REGISTER_RAX,
+            static_cast<std::uint32_t>(*caller), code.begin, mask.operands[1].imm.value.u});
     }
     return result;
 }
@@ -5456,9 +5963,385 @@ std::vector<Expression> Manager(const Emulator::Program& code) {
     return result;
 }
 
+struct PoseSeedGraph {
+    std::vector<std::vector<std::size_t>> successors, predecessors;
+    std::vector<bool> reachable, ancestors;
+};
+
+static std::optional<PoseSeedGraph> PoseSeedEdges(const Emulator::Program& source, std::size_t before) {
+    const auto& code = source.instructions;
+    if (code.empty() || code.size() > 0x10000 || before >= code.size())
+        return std::nullopt;
+    PoseSeedGraph result;
+    result.successors.resize(code.size());
+    result.predecessors.resize(code.size());
+    result.reachable.resize(code.size());
+    result.ancestors.resize(code.size());
+    std::vector<std::size_t> pending{0};
+    while (!pending.empty()) {
+        const auto at = pending.back();
+        pending.pop_back();
+        if (result.reachable[at])
+            continue;
+        result.reachable[at] = true;
+        const auto& d = code[at];
+        const auto category = d.instruction.meta.category;
+        const auto push = [&](std::size_t next) {
+            result.successors[at].push_back(next);
+            result.predecessors[next].push_back(at);
+            pending.push_back(next);
+        };
+        if (category != ZYDIS_CATEGORY_RET && category != ZYDIS_CATEGORY_UNCOND_BR) {
+            if (at + 1 >= code.size() || code[at + 1].address != d.address + d.instruction.length)
+                return std::nullopt;
+            push(at + 1);
+        }
+        if (category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR) {
+            const auto& o = d.operands[0];
+            if (o.type != ZYDIS_OPERAND_TYPE_IMMEDIATE || !o.imm.is_relative)
+                return std::nullopt;
+            const auto address = d.address + d.instruction.length + o.imm.value.s;
+            const auto found = std::lower_bound(code.begin(), code.end(), address,
+                [](const auto& value, std::uint64_t target) { return value.address < target; });
+            if (found == code.end() || found->address != address)
+                return std::nullopt;
+            push(static_cast<std::size_t>(found - code.begin()));
+        }
+    }
+    if (!result.reachable[before])
+        return std::nullopt;
+    pending.push_back(before);
+    while (!pending.empty()) {
+        const auto at = pending.back();
+        pending.pop_back();
+        if (result.ancestors[at])
+            continue;
+        result.ancestors[at] = true;
+        pending.insert(pending.end(), result.predecessors[at].begin(), result.predecessors[at].end());
+    }
+    return result;
+}
+
+static bool PoseSeedWrites(const Emulator::Decoded& d, ZydisRegister reg) {
+    const auto mask = Dependency(reg);
+    if (d.instruction.meta.category == ZYDIS_CATEGORY_CALL && (mask & 0xf07u))
+        return true;
+    for (unsigned j = 0; j < d.instruction.operand_count; ++j) {
+        const auto& o = d.operands[j];
+        if (o.type == ZYDIS_OPERAND_TYPE_REGISTER && (o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+            (Dependency(o.reg.value) & mask))
+            return true;
+    }
+    return false;
+}
+
+static bool PoseSeedReads(const Emulator::Decoded& d, ZydisRegister reg) {
+    const auto mask = Dependency(reg);
+    for (unsigned j = 0; j < d.instruction.operand_count; ++j) {
+        const auto& o = d.operands[j];
+        if (o.type == ZYDIS_OPERAND_TYPE_REGISTER && (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ) &&
+            (Dependency(o.reg.value) & mask))
+            return true;
+        if (o.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+            ((Dependency(o.mem.base) | Dependency(o.mem.index)) & mask))
+            return true;
+    }
+    return false;
+}
+
+static bool PoseSeedSlotReads(const Emulator::Decoded& d, Location input) {
+    if (!input.stack || d.instruction.mnemonic == ZYDIS_MNEMONIC_LEA)
+        return false;
+    for (unsigned j = 0; j < d.instruction.operand_count; ++j) {
+        const auto& o = d.operands[j];
+        if (LocalSlot(o) && (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ) && o.mem.disp.value == input.slot)
+            return true;
+    }
+    return false;
+}
+
+static bool PoseSeedSlotClobber(const Emulator::Decoded& d, Location input) {
+    if (d.instruction.meta.category == ZYDIS_CATEGORY_CALL || PoseSeedWrites(d, ZYDIS_REGISTER_RSP))
+        return true;
+    for (unsigned j = 0; j < d.instruction.operand_count; ++j) {
+        const auto& o = d.operands[j];
+        if (o.type != ZYDIS_OPERAND_TYPE_MEMORY || !(o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE))
+            continue;
+        if (!LocalSlot(o) || d.instruction.address_width != 64 ||
+            (o.mem.segment != ZYDIS_REGISTER_DS && o.mem.segment != ZYDIS_REGISTER_SS) || !o.size ||
+            (o.mem.disp.value < input.slot + 8 && o.mem.disp.value + (o.size + 7) / 8 > input.slot))
+            return true;
+    }
+    return false;
+}
+
+static std::optional<Expression> PoseFrameSeed(
+    const Emulator::Program& source, std::size_t before, Location target, const PoseSeedGraph& graph) {
+    if (target.stack || !Dependency(target.reg) || target.reg == ZYDIS_REGISTER_RSP)
+        return std::nullopt;
+    const auto frame = CallerSlot(source, before);
+    if (!frame)
+        return std::nullopt;
+    Expression result{{0, 0, {}, true}, target.reg, 0};
+    auto reg = target.reg;
+    auto at = before;
+    std::set<std::pair<std::size_t, ZydisRegister>> visited;
+    for (unsigned depth = 0; depth < 16; ++depth) {
+        if (!visited.emplace(at, reg).second)
+            return std::nullopt;
+        std::vector<bool> seen(source.instructions.size());
+        std::vector<std::size_t> pending = graph.predecessors[at];
+        std::optional<std::size_t> definition;
+        if (pending.empty())
+            return std::nullopt;
+        while (!pending.empty()) {
+            const auto previous = pending.back();
+            pending.pop_back();
+            if (seen[previous])
+                continue;
+            seen[previous] = true;
+            const auto& d = source.instructions[previous];
+            if (PoseSeedWrites(d, reg)) {
+                if (definition && *definition != previous)
+                    return std::nullopt;
+                definition = previous;
+            } else {
+                if (graph.predecessors[previous].empty())
+                    return std::nullopt;
+                pending.insert(
+                    pending.end(), graph.predecessors[previous].begin(), graph.predecessors[previous].end());
+            }
+        }
+        if (!definition || *definition >= at || CallerSlot(source, *definition) != frame)
+            return std::nullopt;
+        const auto& d = source.instructions[*definition];
+        const auto& x = d.operands[0];
+        const auto& y = d.operands[1];
+        if (d.instruction.operand_count_visible != 2 || x.type != ZYDIS_OPERAND_TYPE_REGISTER ||
+            x.reg.value != reg || x.size != 64 || (x.actions & ZYDIS_OPERAND_ACTION_CONDWRITE))
+            return std::nullopt;
+        result.code.instructions.push_back(d);
+        if (d.instruction.mnemonic == ZYDIS_MNEMONIC_LEA && d.instruction.address_width == 64 &&
+            y.type == ZYDIS_OPERAND_TYPE_MEMORY && y.mem.base == ZYDIS_REGISTER_RSP &&
+            y.mem.index == ZYDIS_REGISTER_NONE && y.size == 64) {
+            std::reverse(result.code.instructions.begin(), result.code.instructions.end());
+            result.code.begin = result.code.instructions.front().address;
+            const auto& last = result.code.instructions.back();
+            result.code.end = last.address + last.instruction.length;
+            return result;
+        }
+        if (d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV || y.type != ZYDIS_OPERAND_TYPE_REGISTER ||
+            y.size != 64 || !Dependency(y.reg.value) || y.reg.value == ZYDIS_REGISTER_RSP)
+            return std::nullopt;
+        reg = y.reg.value;
+        at = *definition;
+    }
+    return std::nullopt;
+}
+
+static std::optional<std::size_t> PoseSeedDefinition(
+    const Emulator::Program& source, std::size_t before, Location target, const PoseSeedGraph& graph) {
+    std::vector<bool> seen(source.instructions.size());
+    auto pending = graph.predecessors[before];
+    std::optional<std::size_t> result;
+    if (pending.empty())
+        return std::nullopt;
+    while (!pending.empty()) {
+        const auto at = pending.back();
+        pending.pop_back();
+        if (seen[at])
+            continue;
+        seen[at] = true;
+        const auto writes = target.stack ? PoseSeedSlotClobber(source.instructions[at], target)
+                                         : PoseSeedWrites(source.instructions[at], target.reg);
+        if (writes) {
+            if (result && *result != at)
+                return std::nullopt;
+            result = at;
+        } else {
+            if (graph.predecessors[at].empty())
+                return std::nullopt;
+            pending.insert(pending.end(), graph.predecessors[at].begin(), graph.predecessors[at].end());
+        }
+    }
+    return result;
+}
+
+static std::optional<Expression> PoseClosedFrameSeed(
+    const Emulator::Program& source, std::size_t before, Location target, const PoseSeedGraph& graph) {
+    auto result = Trace(source, before, target);
+    const auto frame = CallerSlot(source, before);
+    if (!result || result->inputs || !frame || result->code.instructions.size() > 128 ||
+        (target.stack && (target.slot < 0 || target.slot > 0x7ff0)))
+        return std::nullopt;
+    constexpr std::array operations{ZYDIS_MNEMONIC_MOV, ZYDIS_MNEMONIC_LEA, ZYDIS_MNEMONIC_ADD,
+        ZYDIS_MNEMONIC_SUB, ZYDIS_MNEMONIC_XOR, ZYDIS_MNEMONIC_AND, ZYDIS_MNEMONIC_OR, ZYDIS_MNEMONIC_SHL,
+        ZYDIS_MNEMONIC_SHR, ZYDIS_MNEMONIC_SAR, ZYDIS_MNEMONIC_ROL, ZYDIS_MNEMONIC_ROR, ZYDIS_MNEMONIC_NEG,
+        ZYDIS_MNEMONIC_NOT, ZYDIS_MNEMONIC_IMUL, ZYDIS_MNEMONIC_BSWAP};
+    std::vector<bool> selected(source.instructions.size());
+    std::vector<std::size_t> indices;
+    for (const auto& d : result->code.instructions) {
+        const auto found = std::lower_bound(source.instructions.begin(), source.instructions.end(), d.address,
+            [](const auto& value, std::uint64_t address) { return value.address < address; });
+        if (found == source.instructions.end() || found->address != d.address)
+            return std::nullopt;
+        const auto index = static_cast<std::size_t>(found - source.instructions.begin());
+        if (index >= before || (!indices.empty() && index <= indices.back()) || !graph.reachable[index])
+            return std::nullopt;
+        selected[index] = true;
+        indices.push_back(index);
+    }
+    const auto definition = PoseSeedDefinition(source, before, target, graph);
+    if (!definition || !selected[*definition])
+        return std::nullopt;
+    const auto previous = [&](std::size_t at, Location dependency) {
+        const auto writer = PoseSeedDefinition(source, at, dependency, graph);
+        return writer && *writer < at && selected[*writer];
+    };
+    const auto register_read = [&](std::size_t at, ZydisRegister reg) {
+        if (Dependency(reg) & Dependency(ZYDIS_REGISTER_RSP))
+            return CallerSlot(source, at) == frame;
+        return reg == ZYDIS_REGISTER_NONE || reg == ZYDIS_REGISTER_RIP ||
+            (Dependency(reg) && previous(at, {reg}));
+    };
+    for (const auto index : indices) {
+        const auto& d = source.instructions[index];
+        const auto& i = d.instruction;
+        if (std::find(operations.begin(), operations.end(), i.mnemonic) == operations.end() ||
+            (i.cpu_flags && i.cpu_flags->tested))
+            return std::nullopt;
+        const auto zero = i.mnemonic == ZYDIS_MNEMONIC_XOR && i.operand_count_visible == 2 &&
+            d.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            d.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            d.operands[0].reg.value == d.operands[1].reg.value;
+        for (unsigned j = 0; j < i.operand_count; ++j) {
+            const auto& o = d.operands[j];
+            if (o.actions & ZYDIS_OPERAND_ACTION_CONDWRITE)
+                return std::nullopt;
+            if (o.type == ZYDIS_OPERAND_TYPE_REGISTER && !Dependency(o.reg.value) &&
+                ((o.reg.value != ZYDIS_REGISTER_RFLAGS && o.reg.value != ZYDIS_REGISTER_EFLAGS) ||
+                    (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ)))
+                return std::nullopt;
+            if (o.type == ZYDIS_OPERAND_TYPE_REGISTER && Dependency(o.reg.value)) {
+                if (o.size < 32 || o.size > 64 ||
+                    ((o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+                        (Dependency(o.reg.value) & Dependency(ZYDIS_REGISTER_RSP))))
+                    return std::nullopt;
+                if (!zero && (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ) &&
+                    !register_read(index, o.reg.value))
+                    return std::nullopt;
+            }
+            if (o.type != ZYDIS_OPERAND_TYPE_MEMORY)
+                continue;
+            if (i.address_width != 64 ||
+                (o.mem.segment != ZYDIS_REGISTER_DS && o.mem.segment != ZYDIS_REGISTER_SS) ||
+                !register_read(index, o.mem.base) || !register_read(index, o.mem.index))
+                return std::nullopt;
+            if (i.mnemonic == ZYDIS_MNEMONIC_LEA)
+                continue;
+            if (!LocalSlot(o) || o.size != 64 || o.mem.disp.value < 0 || o.mem.disp.value > 0x7ff0 ||
+                CallerSlot(source, index) != frame ||
+                ((o.actions & ZYDIS_OPERAND_ACTION_MASK_READ) &&
+                    !previous(index, {ZYDIS_REGISTER_NONE, o.mem.disp.value, true})))
+                return std::nullopt;
+        }
+    }
+    return result;
+}
+
+static bool PoseSeedInputStable(const Emulator::Program& source, std::size_t before, const Expression& seed,
+    Location input, const PoseSeedGraph& graph) {
+    if ((!input.stack && !Dependency(input.reg)) || (input.stack && (input.slot < 0 || input.slot > 0x7ff0)))
+        return false;
+    const auto frame = input.stack ? CallerSlot(source, before) : std::optional<std::int64_t>{};
+    if (input.stack && !frame)
+        return false;
+    bool found_read = false;
+    for (const auto& d : seed.code.instructions) {
+        const auto reads = input.stack ? PoseSeedSlotReads(d, input) : PoseSeedReads(d, input.reg);
+        if (!reads)
+            continue;
+        found_read = true;
+        const auto native = std::lower_bound(source.instructions.begin(), source.instructions.end(),
+            d.address, [](const auto& value, std::uint64_t address) { return value.address < address; });
+        if (native == source.instructions.end() || native->address != d.address)
+            return false;
+        const auto index = static_cast<std::size_t>(native - source.instructions.begin());
+        if (input.stack) {
+            if (!PoseSeedSlotReads(*native, input) || PoseSeedSlotClobber(*native, input) ||
+                native->instruction.address_width != 64 || CallerSlot(source, index) != frame)
+                return false;
+            for (unsigned j = 0; j < native->instruction.operand_count; ++j) {
+                const auto& o = native->operands[j];
+                if (LocalSlot(o) && (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ) &&
+                    o.mem.disp.value == input.slot &&
+                    (o.size != 64 ||
+                        (o.mem.segment != ZYDIS_REGISTER_DS && o.mem.segment != ZYDIS_REGISTER_SS)))
+                    return false;
+            }
+        } else if (!PoseSeedReads(*native, input.reg) || PoseSeedWrites(*native, input.reg))
+            return false;
+        if (!graph.reachable[index] || !graph.ancestors[index])
+            return false;
+        std::vector<bool> seen(source.instructions.size());
+        auto pending = graph.predecessors[before];
+        if (pending.empty())
+            return false;
+        while (!pending.empty()) {
+            const auto at = pending.back();
+            pending.pop_back();
+            if (at == index || seen[at])
+                continue;
+            seen[at] = true;
+            if (input.stack ? PoseSeedSlotClobber(source.instructions[at], input)
+                            : PoseSeedWrites(source.instructions[at], input.reg))
+                return false;
+            if (graph.predecessors[at].empty())
+                return false;
+            pending.insert(pending.end(), graph.predecessors[at].begin(), graph.predecessors[at].end());
+        }
+    }
+    return found_read && graph.reachable[before];
+}
+
+static std::optional<PointerDescriptor> PoseFlow(const Emulator::Program& source,
+    const Emulator::Program& flow_code, std::size_t begin, std::size_t end, Location input, Location output,
+    bool strict) {
+    auto result = Flow(flow_code, begin, end, input, output);
+    if (!result || !strict)
+        return result;
+    if (source.instructions.size() != flow_code.instructions.size())
+        return std::nullopt;
+    for (std::size_t j = 0; j < source.instructions.size(); ++j)
+        if (source.instructions[j].address != flow_code.instructions[j].address ||
+            source.instructions[j].instruction.length != flow_code.instructions[j].instruction.length)
+            return std::nullopt;
+    std::optional<PoseSeedGraph> graph;
+    for (auto& seed : result->seeds) {
+        bool bound = (seed.value.inputs & Dependency(input.reg)) != 0;
+        if (input.stack)
+            for (const auto& d : seed.value.code.instructions)
+                bound |= PoseSeedSlotReads(d, input);
+        if (!bound)
+            continue;
+        if (!graph)
+            graph = PoseSeedEdges(source, begin);
+        if (!graph)
+            return std::nullopt;
+        if (auto value = PoseFrameSeed(source, begin, seed.target, *graph))
+            seed.value = std::move(*value);
+        else if (auto closed_frame = PoseClosedFrameSeed(source, begin, seed.target, *graph))
+            seed.value = std::move(*closed_frame);
+        else if (!PoseSeedInputStable(source, begin, seed.value, input, *graph))
+            return std::nullopt;
+    }
+    return result;
+}
+
 std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const ValidationObserver& validation) {
     std::vector<PoseDescriptor> result;
     const auto& instructions = code.instructions;
+    std::optional<Emulator::Program> normalized;
     std::string_view reason = "pose native vector access not found";
     std::uint64_t reason_at = code.begin, observed{};
     unsigned reached{};
@@ -5481,7 +6364,8 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
             ? static_cast<std::size_t>(found - instructions.begin())
             : instructions.size();
     };
-    for (unsigned proof = 0; proof < 2 && result.empty(); ++proof) {
+    for (unsigned proof = 0; proof < 4 && result.empty(); ++proof) {
+        const bool expanded = (proof & 1u) != 0;
         for (std::size_t pair = 1; pair + 1 < instructions.size(); ++pair) {
             const auto& a = instructions[pair];
             const auto& b = instructions[pair + 1];
@@ -5530,7 +6414,7 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
                         d.instruction.mnemonic != ZYDIS_MNEMONIC_MOVZX &&
                         d.instruction.mnemonic != ZYDIS_MNEMONIC_TEST &&
                         d.instruction.mnemonic != ZYDIS_MNEMONIC_ADD &&
-                        (!proof || d.instruction.mnemonic != ZYDIS_MNEMONIC_XOR)) ||
+                        (!expanded || d.instruction.mnemonic != ZYDIS_MNEMONIC_XOR)) ||
                     o.type != ZYDIS_OPERAND_TYPE_MEMORY || (o.size != 8 && o.size != 32) ||
                     o.mem.index != ZYDIS_REGISTER_NONE || o.mem.disp.value <= 0 || !Dependency(o.mem.base) ||
                     o.mem.base == ZYDIS_REGISTER_RSP)
@@ -5543,7 +6427,7 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
                 failed(2, "pose owning asset flag not found", a.address);
                 continue;
             }
-            if (instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_ADD || proof) {
+            if (instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_ADD || expanded) {
                 const auto member =
                     instructions[flag]
                         .operands[instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_TEST ? 0 : 1];
@@ -5561,7 +6445,7 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
                         break;
                     const auto& o = d.operands[d.instruction.mnemonic == ZYDIS_MNEMONIC_TEST ? 0 : 1];
                     const bool member_read = d.instruction.mnemonic == ZYDIS_MNEMONIC_ADD ||
-                        (proof &&
+                        (expanded &&
                             (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV ||
                                 d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVZX ||
                                 d.instruction.mnemonic == ZYDIS_MNEMONIC_TEST ||
@@ -5599,7 +6483,11 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
                 if (buffer_begin == flag)
                     continue;
             }
-            auto buffer = Flow(code, buffer_begin, pair, {asset}, {a.operands[1].mem.base});
+            if (proof >= 2 && !normalized)
+                normalized = Simplify(code, true);
+            const auto& flow_code = proof < 2 ? code : *normalized;
+            auto buffer =
+                PoseFlow(code, flow_code, buffer_begin, pair, {asset}, {a.operands[1].mem.base}, proof >= 2);
 
             if (!buffer) {
                 failed(3, "pose buffer dataflow not proven", a.address);
@@ -5669,7 +6557,8 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
                     test.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
                     test.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
                     (test.operands[1].imm.value.u != 1 &&
-                        (!xor_flag || !std::has_single_bit(test.operands[1].imm.value.u) ||
+                        ((!xor_flag && (proof < 2 || test.operands[0].size != 32)) ||
+                            !std::has_single_bit(test.operands[1].imm.value.u) ||
                             test.operands[1].imm.value.u > 0xffffffffu)) ||
                     conditional.instruction.meta.category != ZYDIS_CATEGORY_COND_BR)
                     continue;
@@ -5680,7 +6569,7 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
                 for (std::size_t j = branch + 1; j < instructions.size() && j < branch + 192; ++j) {
                     if (instructions[j].instruction.mnemonic == ZYDIS_MNEMONIC_JMP) {
                         const auto to = target(instructions[j]);
-                        if (to > other && (to < flag || (proof && to == flag))) {
+                        if (to > other && (to < flag || (expanded && to == flag))) {
                             join = to;
                             jump = j;
                         }
@@ -5693,7 +6582,7 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
                     for (std::size_t j = other; j < instructions.size() && j < other + 192; ++j) {
                         if (instructions[j].instruction.mnemonic == ZYDIS_MNEMONIC_JMP) {
                             const auto to = target(instructions[j]);
-                            if (to > branch && (to < flag || (proof && to == flag)) && to < other) {
+                            if (to > branch && (to < flag || (expanded && to == flag)) && to < other) {
                                 join = to;
                                 jump = j;
                             }
@@ -5782,11 +6671,13 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
                         }
                     }
 
-                    const auto selector_end = proof ? buffer_begin : encoded_flag ? flag : consume;
-                    const auto selector_output = proof || encoded_flag ? asset : decoded_asset;
-                    auto selector = Flow(code, start, selector_end, input, {selector_output});
-                    if (!selector && proof && input.stack)
-                        selector = Flow(code, start, selector_end, {receiver}, {selector_output});
+                    const auto selector_end = expanded ? buffer_begin : encoded_flag ? flag : consume;
+                    const auto selector_output = expanded || encoded_flag ? asset : decoded_asset;
+                    auto selector =
+                        PoseFlow(code, flow_code, start, selector_end, input, {selector_output}, proof >= 2);
+                    if (!selector && expanded && input.stack)
+                        selector = PoseFlow(
+                            code, flow_code, start, selector_end, {receiver}, {selector_output}, proof >= 2);
                     if (selector)
                         result.push_back({std::move(*selector), *buffer});
                 }

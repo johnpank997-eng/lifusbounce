@@ -97,20 +97,30 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
     const bool manager_recipe_first = stage == "manager_emulation_failed" &&
         manager_recipe_examples.size() < ManagerRecipeExampleLimit &&
         !manager_recipe_examples.contains(manager_recipe);
+    const ArrayRecipeKey array_recipe{array_receiver, index, code.begin, code.end};
+    const bool array_recipe_first = receiver_array &&
+        array_recipe_examples.size() < ArrayRecipeExampleLimit &&
+        !array_recipe_examples.contains(array_recipe);
     const auto receiver_samples = array_receiver_executions.find(array_receiver);
+    const bool receiver_identity_capacity = receiver_samples != array_receiver_executions.end() ||
+        array_receiver_executions.size() < ArrayReceiverLimit;
     const bool receiver_capacity = receiver_samples == array_receiver_executions.end()
         ? array_receiver_executions.size() < ArrayReceiverLimit
         : receiver_samples->second < ArrayReceiverExecutionLimit;
+    const bool array_normal_capacity = receiver_capacity && array_executions < ArrayInputLimit;
+    const bool array_priority = array_recipe_first && receiver_identity_capacity && !array_normal_capacity;
     try {
         const auto samples = execution_samples.find(stage);
         const bool stage_capacity =
             samples == execution_samples.end() || samples->second < StageExecutionLimit;
+        const auto now = std::chrono::steady_clock::now();
         if (diagnostics::Enabled() && captured_executions < ExecutionLimit &&
-            (!receiver_array || (receiver_capacity && array_executions < ArrayInputLimit)) &&
+            (now >= discarded_retry_at || stage_capacity || manager_recipe_first || array_recipe_first) &&
+            (!receiver_array || array_normal_capacity || array_priority) &&
             (stage_capacity || !successful_stages.contains(stage) ||
                 execution_failures.size() < ExecutionFailureLimit ||
                 (stage == "array_emulation_failed" && array_executions < ArrayInputLimit) ||
-                manager_recipe_first ||
+                manager_recipe_first || array_priority ||
                 (manager_hint && manager_output_executions.size() < ManagerOutputExecutionLimit))) {
             before = cpu.Snapshot();
             if (manager_hint)
@@ -118,7 +128,9 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
             key = {stage, index, code.begin, code.end, before.registers, before.vectors, before.gs,
                 before.flags, StackKey(cpu.StackData()), receiver_array ? array_receiver : 0};
             const auto retry = execution_retry.find(key);
-            observe = retry == execution_retry.end() || std::chrono::steady_clock::now() >= retry->second;
+            const auto discarded = discarded_execution_retry.find(key);
+            observe = (retry == execution_retry.end() || now >= retry->second) &&
+                (discarded == discarded_execution_retry.end() || now >= discarded->second);
         }
     } catch (...) {
     }
@@ -155,8 +167,8 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
             execution_failures.size() < ExecutionFailureLimit &&
             !execution_failures.contains(
                 {stage, static_cast<unsigned>(result.status), result.address, result.mnemonic});
-        const bool array_input =
-            stage == "array_emulation_failed" && array_executions < ArrayInputLimit && !(flags & bit);
+        const bool array_input = stage == "array_emulation_failed" && array_executions < ArrayInputLimit &&
+            (!receiver_array || receiver_capacity) && !(flags & bit);
         const auto samples = execution_samples.find(stage);
         const bool stage_capacity =
             samples == execution_samples.end() || samples->second < StageExecutionLimit;
@@ -167,21 +179,39 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
             !stage_capacity && !manager_recipe_first &&
             manager_output_executions.size() < ManagerOutputExecutionLimit &&
             !manager_output_executions.contains(key);
-        const bool keep = (!receiver_array || (receiver_capacity && array_executions < ArrayInputLimit)) &&
-            (distinct_failure || array_input || manager_recipe_first || manager_priority ||
+        const bool keep = (!receiver_array || array_normal_capacity || array_priority) &&
+            (distinct_failure || array_input || array_priority || manager_recipe_first || manager_priority ||
                 (!(flags & bit) && (first_success || stage_capacity)));
+        const auto retry_at = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         if (prior != executions.end())
-            execution_retry[key] = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+            execution_retry[key] = retry_at;
         if (!keep) {
             ++discarded_executions;
+            if (prior == executions.end()) {
+                if (discarded_execution_retry.contains(key) ||
+                    discarded_execution_retry.size() < DiscardedRetryLimit)
+                    discarded_execution_retry[key] = retry_at;
+                else
+                    discarded_retry_at = retry_at;
+            }
             return result;
         }
         executions[key] = flags | bit;
-        execution_retry[key] = std::chrono::steady_clock::now() + std::chrono::seconds(30);
-        if (array_input || receiver_array)
+        execution_retry[key] = retry_at;
+        discarded_execution_retry.erase(key);
+        if (array_input || (receiver_array && !array_priority))
             ++array_executions;
-        if (receiver_array)
-            ++array_receiver_executions[array_receiver];
+        if (receiver_array) {
+            auto& receiver_count = array_receiver_executions[array_receiver];
+            if (!array_priority)
+                ++receiver_count;
+            if (array_recipe_first)
+                array_recipe_examples.emplace(array_recipe);
+        }
+        if (array_priority) {
+            ++array_priority_executions;
+            ++array_receiver_priority_executions[array_receiver];
+        }
         if (manager_priority)
             manager_output_executions.emplace(key);
         if (manager_recipe_first)
@@ -236,6 +266,7 @@ EmulationResult RuntimeDiagnostics::Execute(Emulator& cpu, const Emulator::Progr
                 {"reads_total", collected.total}, {"status", static_cast<unsigned>(result.status)},
                 {"steps", result.steps}, {"stop_rva", diagnostics::Hex(result.address - module)},
                 {"array_receiver", diagnostics::Hex(receiver_array ? array_receiver : 0)},
+                {"array_recipe_first", array_recipe_first}, {"array_recipe_priority", array_priority},
                 {"manager_output_register", manager_hint ? ZydisRegisterGetString(manager_output) : "none"},
                 {"manager_output_value", diagnostics::Hex(manager_value)},
                 {"manager_output_canonical_hint", manager_canonical},

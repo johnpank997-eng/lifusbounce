@@ -391,6 +391,33 @@ void RuntimeDiagnostics::Error(std::string_view stage, DWORD error) noexcept {
     }
 }
 
+void RuntimeDiagnostics::ArrayEntry(std::size_t index, std::uint64_t manager, std::uint64_t entries,
+    unsigned ordinal, std::uint64_t value, std::uint64_t vtable, bool entry_read_complete,
+    bool vtable_read_complete, bool pointer_accepted, bool type_accepted, DWORD error) noexcept {
+    if (!diagnostics::Enabled())
+        return;
+    try {
+        const auto offset = ordinal * sizeof(std::uint64_t);
+        const bool slot_valid = entries <= ~std::uint64_t{} - offset;
+        const unsigned outcome = static_cast<unsigned>(entry_read_complete) |
+            (static_cast<unsigned>(vtable_read_complete) << 1) |
+            (static_cast<unsigned>(pointer_accepted) << 2) | (static_cast<unsigned>(type_accepted) << 3);
+        if (ordinal < 16 && array_entry_examples.size() < ArrayEntryExampleLimit &&
+            array_entry_examples.emplace(index, manager, entries, ordinal, outcome, error).second)
+            diagnostics::Write("array_entry_evidence",
+                {{"path_index", index}, {"manager", diagnostics::Hex(manager)},
+                    {"array", diagnostics::Hex(entries)}, {"ordinal", ordinal},
+                    {"slot", diagnostics::Hex(slot_valid ? entries + offset : 0)}, {"slot_valid", slot_valid},
+                    {"value", diagnostics::Hex(value)}, {"vtable", diagnostics::Hex(vtable)},
+                    {"entry_read_complete", entry_read_complete},
+                    {"vtable_read_complete", vtable_read_complete}, {"win32", error},
+                    {"outcome_mask", outcome}, {"pointer_accepted", pointer_accepted},
+                    {"type_accepted", type_accepted}, {"actor_role_verified", false},
+                    {"additional_target_reads", 0u}});
+    } catch (...) {
+    }
+}
+
 bool RuntimeDiagnostics::Run(Emulator& cpu, const Emulator::Program& code, std::string_view stage,
     std::size_t index, std::uint64_t module, std::uint64_t array_receiver, ZydisRegister manager_output) {
     const auto result = Execute(cpu, code, stage, index, module, array_receiver, manager_output);
@@ -424,37 +451,63 @@ void RuntimeDiagnostics::Emulation(
 }
 
 void RuntimeDiagnostics::Report() const noexcept {
+    const auto remaining = [](std::size_t limit, std::size_t used) {
+        return used < limit ? limit - used : 0;
+    };
     for (const auto& [name, count] : counters)
         diagnostics::Write("runtime_counter", {{"reason", name}, {"count", count}});
     diagnostics::Write("runtime_evidence_summary",
         {{"executions", captured_executions}, {"execution_limit", ExecutionLimit},
             {"reads_per_execution_limit", ReadLimit}, {"stage_execution_limit", StageExecutionLimit},
             {"array_input_executions", array_executions}, {"array_input_limit", ArrayInputLimit},
+            {"array_recipe_examples", array_recipe_examples.size()},
+            {"array_recipe_example_limit", ArrayRecipeExampleLimit},
+            {"array_recipe_budget_remaining",
+                remaining(ArrayRecipeExampleLimit, array_recipe_examples.size())},
+            {"array_priority_executions", array_priority_executions},
+            {"array_entry_examples", array_entry_examples.size()},
+            {"array_entry_example_limit", ArrayEntryExampleLimit},
+            {"array_entry_budget_remaining", remaining(ArrayEntryExampleLimit, array_entry_examples.size())},
             {"array_receiver_identities", array_receiver_executions.size()},
             {"array_receiver_limit", ArrayReceiverLimit},
             {"array_receiver_execution_limit", ArrayReceiverExecutionLimit},
             {"manager_output_executions", manager_output_executions.size()},
             {"manager_output_execution_limit", ManagerOutputExecutionLimit},
             {"manager_output_budget_remaining",
-                ManagerOutputExecutionLimit - manager_output_executions.size()},
+                remaining(ManagerOutputExecutionLimit, manager_output_executions.size())},
             {"manager_recipe_examples", manager_recipe_examples.size()},
             {"manager_recipe_example_limit", ManagerRecipeExampleLimit},
-            {"manager_recipe_budget_remaining", ManagerRecipeExampleLimit - manager_recipe_examples.size()},
+            {"manager_recipe_budget_remaining",
+                remaining(ManagerRecipeExampleLimit, manager_recipe_examples.size())},
             {"distinct_failures", execution_failures.size()},
             {"distinct_failure_limit", ExecutionFailureLimit}, {"execution_keys", executions.size()},
             {"execution_key_limit", ExecutionLimit}, {"observed_executions", observed_executions},
             {"discarded_executions", discarded_executions}, {"probes", probes.size()},
+            {"discarded_retry_keys", discarded_execution_retry.size()},
+            {"discarded_retry_key_limit", DiscardedRetryLimit},
+            {"discarded_retry_budget_remaining",
+                remaining(DiscardedRetryLimit, discarded_execution_retry.size())},
+            {"discarded_overflow_retry_active", std::chrono::steady_clock::now() < discarded_retry_at},
             {"probe_limit", ProbeLimit}, {"retry_seconds", 30u},
             {"input_key", "registers vectors gs flags stack fingerprint array receiver"},
-            {"execution_budget_remaining", ExecutionLimit - captured_executions},
-            {"array_input_budget_remaining", ArrayInputLimit - array_executions},
-            {"distinct_failure_budget_remaining", ExecutionFailureLimit - execution_failures.size()},
+            {"execution_budget_remaining", remaining(ExecutionLimit, captured_executions)},
+            {"array_input_budget_remaining", remaining(ArrayInputLimit, array_executions)},
+            {"distinct_failure_budget_remaining",
+                remaining(ExecutionFailureLimit, execution_failures.size())},
             {"additional_execution_capacity", captured_executions < ExecutionLimit}});
-    for (const auto& [receiver, count] : array_receiver_executions)
+    for (const auto& [receiver, count] : array_receiver_executions) {
+        const auto priority = array_receiver_priority_executions.find(receiver);
+        const auto priority_count =
+            priority == array_receiver_priority_executions.end() ? 0u : priority->second;
+        const auto recipes = std::count_if(array_recipe_examples.begin(), array_recipe_examples.end(),
+            [&](const auto& value) { return std::get<0>(value) == receiver; });
         diagnostics::Write("array_receiver_evidence_summary",
-            {{"receiver", diagnostics::Hex(receiver)}, {"executions", count},
+            {{"receiver", diagnostics::Hex(receiver)}, {"executions", count}, {"ordinary_executions", count},
+                {"priority_executions", priority_count}, {"captured_executions", count + priority_count},
+                {"recipe_examples", static_cast<std::size_t>(recipes)},
                 {"execution_limit", ArrayReceiverExecutionLimit},
-                {"execution_budget_remaining", ArrayReceiverExecutionLimit - count},
+                {"execution_budget_remaining", remaining(ArrayReceiverExecutionLimit, count)},
                 {"receiver_role_verified", false}});
+    }
 }
 }

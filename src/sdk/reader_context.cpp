@@ -78,15 +78,32 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                                 continue;
                             }
                             bool typed = false;
-                            for (const auto first :
-                                Array<Address>(entries, std::min<std::uint64_t>(count, 16)))
+                            std::vector<Address> first_entries;
+                            try {
+                                first_entries = Array<Address>(entries, std::min<std::uint64_t>(count, 16));
+                            } catch (ReadFailure failure) {
+                                trace.ArrayEntry(recipe, manager, entries, 0, 0, 0, false, false, false,
+                                    false, failure.error);
+                                throw;
+                            }
+                            unsigned ordinal{};
+                            for (const auto first : first_entries) {
+                                const bool pointer = Pointer(first);
                                 try {
-                                    if (Pointer(first) && Section(Q(first))) {
+                                    const auto vtable = pointer ? Q(first) : 0;
+                                    const bool accepted = pointer && Section(vtable);
+                                    trace.ArrayEntry(recipe, manager, entries, ordinal, first, vtable, true,
+                                        pointer, pointer, accepted, ERROR_SUCCESS);
+                                    if (accepted) {
                                         typed = true;
                                         break;
                                     }
-                                } catch (ReadFailure) {
+                                } catch (ReadFailure failure) {
+                                    trace.ArrayEntry(recipe, manager, entries, ordinal, first, 0, true, false,
+                                        pointer, false, failure.error);
                                 }
+                                ++ordinal;
+                            }
                             if (!typed) {
                                 trace.Count("entity_array_without_typed_entries");
                                 continue;
