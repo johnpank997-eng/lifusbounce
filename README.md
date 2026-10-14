@@ -28,6 +28,7 @@ Stay safe!
 - vk
 - megamind
 - Bary
+- Retaste
 - everyone who sent me their build
 
 **I appreciate you all.**
