@@ -1517,37 +1517,50 @@ std::optional<Expression> Root(const Emulator::Program& code, const ValidationOb
                 code.begin, (ring ? 1u : 0u) | (divide ? 2u : 0u) | (stride ? 4u : 0u));
         return std::nullopt;
     }
-    for (std::size_t j = 0; j < code.instructions.size(); ++j) {
-        const auto& d = code.instructions[j];
-        if (d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV || d.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
-            d.operands[1].mem.index != ZYDIS_REGISTER_NONE || d.operands[1].mem.base == ZYDIS_REGISTER_RIP ||
-            d.operands[1].mem.base == ZYDIS_REGISTER_RSP || d.operands[1].mem.disp.value <= 0)
-            continue;
-        auto result = Slice(code, j, d.operands[1].mem.base);
-        if (!result || result->inputs || result->code.instructions.empty()) {
+    const auto find = [&](const Emulator::Program& source) -> std::optional<Expression> {
+        for (std::size_t j = 0; j < source.instructions.size(); ++j) {
+            const auto& d = source.instructions[j];
+            if (d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+                d.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+                d.operands[1].mem.index != ZYDIS_REGISTER_NONE ||
+                d.operands[1].mem.base == ZYDIS_REGISTER_RIP ||
+                d.operands[1].mem.base == ZYDIS_REGISTER_RSP || d.operands[1].mem.disp.value <= 0)
+                continue;
+            auto result = Slice(source, j, d.operands[1].mem.base);
+            if (!result || result->inputs || result->code.instructions.empty()) {
+                if (validation)
+                    validation(!result ? "root receiver dataflow unresolved"
+                                       : "root receiver requires external inputs",
+                        d.address, result ? result->inputs : 0);
+                continue;
+            }
+            const auto& tail = result->code.instructions.back();
+            const bool tls = tail.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                tail.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY && tail.operands[1].mem.scale == 8 &&
+                tail.operands[1].mem.index != ZYDIS_REGISTER_NONE &&
+                std::any_of(result->code.instructions.begin(), result->code.instructions.end(),
+                    [&](const auto& load) {
+                        return load.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                            load.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                            load.operands[0].reg.value == tail.operands[1].mem.base &&
+                            load.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                            load.operands[1].mem.segment == ZYDIS_REGISTER_GS &&
+                            load.operands[1].mem.disp.value == 0x58;
+                    });
+            if (!tls)
+                return result;
             if (validation)
-                validation(
-                    !result ? "root receiver dataflow unresolved" : "root receiver requires external inputs",
-                    d.address, result ? result->inputs : 0);
-            continue;
+                validation("root receiver is a tls container", d.address, 0);
         }
-        const auto& tail = result->code.instructions.back();
-        const bool tls = tail.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
-            tail.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY && tail.operands[1].mem.scale == 8 &&
-            tail.operands[1].mem.index != ZYDIS_REGISTER_NONE &&
-            std::any_of(
-                result->code.instructions.begin(), result->code.instructions.end(), [&](const auto& load) {
-                    return load.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
-                        load.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-                        load.operands[0].reg.value == tail.operands[1].mem.base &&
-                        load.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY &&
-                        load.operands[1].mem.segment == ZYDIS_REGISTER_GS &&
-                        load.operands[1].mem.disp.value == 0x58;
-                });
-        if (!tls)
-            return result;
+        return std::nullopt;
+    };
+    if (auto result = find(code))
+        return result;
+    if (auto result = find(Simplify(code))) {
         if (validation)
-            validation("root receiver is a tls container", d.address, 0);
+            validation(
+                "root receiver algebra normalized", result->code.begin, result->code.instructions.size());
+        return result;
     }
     if (validation)
         validation("root receiver not proven", code.begin, 0);
