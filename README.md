@@ -1,15 +1,36 @@
 # lifusbounce
 
-My 18th birthday special 💗🥳
+My 18th birthday special <3
 
-Im releasing a Rainbow Six external cheat for the latest version (12.10.2026) that does not write memory, do whatever you want with this :)
+Rainbow Six external cheat (14.10.2026) that does not write memory + driver with DSE bypass (tested on 25h2)
 
-it comes with a driver featuring DSE bypass (only works up to 25h2!)
+## Statement and discontinuation (UPDATE)
 
-##### ⚠️ *Tested on only 3 builds, so there could be QB issues! feel free to open issues*
+Hello friends. unfortunately, i have to announce that i will  stop maintaining and updating the lifusbounce source code. it hasnt even been three days since i released it, and people have already started posting it on discord servers or other forums without giving credit and passing it off as their own.
 
-<img width="547" height="171" alt="ss" src="https://github.com/user-attachments/assets/294b4969-39aa-42a8-9326-d8a742094b2f" />
+While i should have expected this, things went too far when people tried to sell the source 1:1 for a ridiculous amount of money. My problem isnt necessarily that people wanted to make money using this source, but rather that the source isnt stable yet and has QB issues. Selling it in its current state would basically be a scam, and i cannot support that.
 
+My goal with this release was simply to give something back to the community. On one hand to devs, so they might understand the engine better and see how certain features are implemented, and on the other to those who just want to use the cheat for free.
+
+I dont yet know if ill release anything else for R6S, but if i do (though the chances are low), it wont be open source anymore.
+
+And to all the people who wanted to make a quick buck off this: i wont name anyone, but you know who you are, and you should be ashamed of yourselves.
+
+Stay safe! 
+
+## Special thanks ♥️ to all the amazing people who supported/helped me:
+
+- joeleguacamole
+- Ryoku
+- teb
+- Varmpy
+- dynx
+- vk
+- megamind
+- Bary
+- everyone who sent me their build
+
+**I appreciate you all.**
 
 ## Features
 
@@ -30,6 +51,3 @@ it comes with a driver featuring DSE bypass (only works up to 25h2!)
 - FOV circle
 - Smoothing
 - Custom keybinds
-
----
-### ⭐ this repo for more :)
