@@ -596,6 +596,46 @@ void Emulator::Step(const Decoded& d) {
             flags_ |= cf | of;
         return;
     }
+    case ZYDIS_MNEMONIC_SHLD:
+    case ZYDIS_MNEMONIC_SHRD: {
+        const auto& z = d.operands[2];
+        const unsigned bits = x.size;
+        const auto scalar = [&](const ZydisDecodedOperand& operand) {
+            return operand.type == ZYDIS_OPERAND_TYPE_REGISTER && operand.size == bits &&
+                ZydisRegisterGetClass(operand.reg.value) ==
+                (bits == 64          ? ZYDIS_REGCLASS_GPR64
+                        : bits == 32 ? ZYDIS_REGCLASS_GPR32
+                                     : ZYDIS_REGCLASS_GPR16);
+        };
+        if (i.operand_count_visible != 3 || (bits != 16 && bits != 32 && bits != 64) ||
+            (!scalar(x) && x.type != ZYDIS_OPERAND_TYPE_MEMORY) || !scalar(y) || z.size != 8 ||
+            (z.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && z.imm.is_relative) ||
+            (z.type != ZYDIS_OPERAND_TYPE_IMMEDIATE &&
+                (z.type != ZYDIS_OPERAND_TYPE_REGISTER || z.reg.value != ZYDIS_REGISTER_CL)))
+            throw Fault{EmulationStatus::invalid_operand};
+        const auto count = static_cast<unsigned>(Value(z) & (bits == 64 ? 63 : 31));
+        if (count > bits)
+            throw Fault{EmulationStatus::unsupported};
+        const auto limit = Mask(bits), a = Value(x) & limit;
+        if (!count) {
+            if (x.type == ZYDIS_OPERAND_TYPE_REGISTER && bits == 32)
+                Write(x, a);
+            return;
+        }
+        const auto b = Value(y) & limit;
+        const bool left = m == ZYDIS_MNEMONIC_SHLD;
+        const auto result = count == bits ? b
+            : left                        ? ((a << count) | (b >> (bits - count))) & limit
+                                          : ((a >> count) | (b << (bits - count))) & limit;
+        const auto carry = left ? (a >> (bits - count)) & 1 : (a >> (count - 1)) & 1;
+        Logical(result, bits);
+        if (carry)
+            flags_ |= cf;
+        if (count == 1 && ((a ^ result) & (1ull << (bits - 1))))
+            flags_ |= of;
+        Write(x, result);
+        return;
+    }
     case ZYDIS_MNEMONIC_SHL:
     case ZYDIS_MNEMONIC_SHR:
     case ZYDIS_MNEMONIC_SAR:
@@ -603,12 +643,20 @@ void Emulator::Step(const Decoded& d) {
     case ZYDIS_MNEMONIC_ROR: {
         const unsigned bits = x.size;
         const auto limit = Mask(bits), a = Value(x) & limit;
-        auto count = static_cast<unsigned>(Value(y) & (bits == 64 ? 63 : 31));
+        const auto masked_count = static_cast<unsigned>(Value(y) & (bits == 64 ? 63 : 31));
+        auto count = masked_count;
         const bool rotate = m == ZYDIS_MNEMONIC_ROL || m == ZYDIS_MNEMONIC_ROR;
         if (rotate)
             count %= bits;
-        if (!count)
+        if (!count) {
+            if (rotate && masked_count) {
+                Write(x, a);
+                const auto carry = m == ZYDIS_MNEMONIC_ROL ? a & 1 : (a >> (bits - 1)) & 1;
+                flags_ = (flags_ & ~cf) | (carry ? cf : 0);
+            } else if (x.type == ZYDIS_OPERAND_TYPE_REGISTER && bits == 32)
+                Write(x, a);
             return;
+        }
         std::uint64_t result{}, carry{};
         const auto old_sign = (a >> (bits - 1)) & 1;
         if (rotate) {

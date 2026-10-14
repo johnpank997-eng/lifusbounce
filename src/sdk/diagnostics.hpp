@@ -30,6 +30,7 @@ class DiscoveryDiagnostics {
     locators::FunctionRecord current_{};
     std::string_view stage_ = "scan";
     std::size_t index_{}, inventory_{}, validation_examples_{};
+    std::array<unsigned, 6> feature_validation_examples_{};
     std::chrono::steady_clock::time_point checkpoint_at_{};
 };
 

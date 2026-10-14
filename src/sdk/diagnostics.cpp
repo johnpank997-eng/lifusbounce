@@ -24,8 +24,19 @@ void Pointer(std::string_view role, std::size_t index, const locators::PointerDe
             {"output", Register(value.output.reg)}, {"output_stack", value.output.stack},
             {"output_slot", value.output.slot}, {"seeds", value.seeds.size()}});
     ReportProgram(role, index, value.code, module);
-    for (std::size_t i = 0; i < std::min<std::size_t>(value.seeds.size(), 8); ++i)
-        Expression("pointer_seed", i, value.seeds[i].value, module);
+    for (std::size_t i = 0; i < std::min<std::size_t>(value.seeds.size(), 8); ++i) {
+        diagnostics::Write("native_pointer_seed",
+            {{"role", role}, {"index", index}, {"seed_index", i},
+                {"target", Register(value.seeds[i].target.reg)},
+                {"target_stack", value.seeds[i].target.stack}, {"target_slot", value.seeds[i].target.slot}});
+        const auto seed_role = role == "pose_asset" ? "pose_asset_seed"
+            : role == "pose_buffer"                 ? "pose_buffer_seed"
+            : role == "operator_instance"           ? "operator_instance_seed"
+            : role == "operator_definition"         ? "operator_definition_seed"
+            : role == "operator_name_reference"     ? "operator_name_reference_seed"
+                                                    : "pointer_seed";
+        Expression(seed_role, index * 32 + i, value.seeds[i].value, module);
+    }
 }
 }
 
@@ -139,6 +150,12 @@ void DiscoveryDiagnostics::Report() const noexcept {
     diagnostics::Write("discovery_inventory",
         {{"records", inventory_}, {"limit", 20000u}, {"complete", inventory_ < 20000},
             {"validation_examples", validation_examples_}});
+    constexpr std::array roles{
+        "owner profile", "name", "health", "operator common asset", "selected character", "defuser"};
+    for (std::size_t i = 0; i < roles.size(); ++i)
+        diagnostics::Write("feature_validation_summary",
+            {{"stage", roles[i]}, {"examples", feature_validation_examples_[i]}, {"limit", 256u},
+                {"complete", feature_validation_examples_[i] < 256}});
 }
 
 void DiscoveryDiagnostics::Enter(
@@ -162,11 +179,23 @@ void DiscoveryDiagnostics::Validation(
     std::string_view rule, std::uint64_t instruction, std::uint64_t observed) noexcept {
     try {
         ++validations_[rule];
-        if (validation_examples_++ < 4000)
-            diagnostics::Write("discovery_validation",
-                {{"rule", rule}, {"stage", stage_}, {"function_rva", diagnostics::Hex(current_.begin)},
-                    {"instruction_rva", diagnostics::Hex(instruction - module_)},
-                    {"observed", diagnostics::Hex(observed)}, {"function_index", index_}});
+        constexpr std::array<std::string_view, 6> roles{
+            "owner profile", "name", "health", "operator common asset", "selected character", "defuser"};
+        const auto role = std::find(roles.begin(), roles.end(), stage_);
+        if (role != roles.end()) {
+            auto& examples = feature_validation_examples_[role - roles.begin()];
+            if (examples >= 256)
+                return;
+            ++examples;
+        } else {
+            if (validation_examples_ >= 4000)
+                return;
+            ++validation_examples_;
+        }
+        diagnostics::Write("discovery_validation",
+            {{"rule", rule}, {"stage", stage_}, {"function_rva", diagnostics::Hex(current_.begin)},
+                {"instruction_rva", diagnostics::Hex(instruction - module_)},
+                {"observed", diagnostics::Hex(observed)}, {"function_index", index_}});
     } catch (...) {
     }
 }
@@ -234,13 +263,95 @@ void ReportNative(const locators::NativeDescriptor& native, std::uint64_t module
             Pointer("pose_buffer", i, native.poses[i].buffer, module);
         }
         for (std::size_t i = 0; i < std::min<std::size_t>(native.ownership.size(), 64); ++i) {
+            diagnostics::Write("ownership_recipe",
+                {{"index", i}, {"owner_type_rva", diagnostics::Hex(native.ownership[i].owner_type - module)},
+                    {"profile_type_rva", diagnostics::Hex(native.ownership[i].profile_type - module)}});
             Expression("owner", i, native.ownership[i].owner, module);
             Expression("owner_profile", i, native.ownership[i].profile, module);
         }
+        for (std::size_t i = 0; i < std::min<std::size_t>(native.usernames.size(), 64); ++i) {
+            const auto& value = native.usernames[i];
+            diagnostics::Write("username_recipe",
+                {{"index", i}, {"owner_type_rva", diagnostics::Hex(value.owner_type - module)},
+                    {"profile_type_rva", diagnostics::Hex(value.profile_type - module)},
+                    {"string_field", diagnostics::Hex(value.string_field)}, {"character_capture", false}});
+            Expression("username_owner", i, value.owner, module);
+            Expression("username_profile", i, value.profile, module);
+        }
+        for (std::size_t i = 0; i < std::min<std::size_t>(native.health.size(), 64); ++i) {
+            const auto& value = native.health[i];
+            diagnostics::Write("health_recipe",
+                {{"index", i}, {"maximum", Register(value.maximum)}, {"current", Register(value.current)}});
+            ReportProgram("health", i, value.code, module);
+        }
+        for (std::size_t i = 0; i < std::min<std::size_t>(native.affiliations.size(), 64); ++i) {
+            const auto& value = native.affiliations[i];
+            diagnostics::Write("affiliation_recipe",
+                {{"index", i}, {"profile", Register(value.profile)}, {"field", diagnostics::Hex(value.field)},
+                    {"null_value", diagnostics::Hex(value.null_value)},
+                    {"pointer_identity", value.pointer_identity}});
+            Expression("affiliation", i, value.object, module);
+        }
+        for (std::size_t i = 0; i < std::min<std::size_t>(native.operator_names.size(), 64); ++i) {
+            const auto& value = native.operator_names[i];
+            diagnostics::Write("operator_name_recipe",
+                {{"index", i}, {"field", diagnostics::Hex(value.field)},
+                    {"consumer_rva", diagnostics::Hex(value.consumer - module)},
+                    {"target_type_rva", diagnostics::Hex(value.target_type - module)}});
+            Pointer("operator_name_reference", i, value.reference, module);
+        }
+        if (native.selected_operator) {
+            const auto& value = *native.selected_operator;
+            diagnostics::Write("selected_operator_recipe",
+                {{"instance_field", diagnostics::Hex(value.instance_field)},
+                    {"definition_field", diagnostics::Hex(value.definition_field)},
+                    {"consumer_rva", diagnostics::Hex(value.consumer - module)},
+                    {"definition_type_rva", diagnostics::Hex(value.definition_type - module)}});
+            Pointer("operator_instance", 0, value.instance, module);
+            Pointer("operator_definition", 0, value.definition, module);
+        }
+        if (native.defuser) {
+            const auto& value = *native.defuser;
+            diagnostics::Write("defuser_recipe",
+                {{"field", diagnostics::Hex(value.field)}, {"object", Register(value.object)},
+                    {"input", Register(value.input)}, {"seeds", value.seeds.size()},
+                    {"write_scope", "private emulator stack"}});
+            ReportProgram("defuser_encoder", 0, value.encoder, module);
+            for (std::size_t i = 0; i < std::min<std::size_t>(value.seeds.size(), 64); ++i) {
+                const auto& seed = value.seeds[i];
+                diagnostics::Write("defuser_seed_recipe",
+                    {{"index", i}, {"output", Register(seed.output)}, {"target", Register(seed.target)},
+                        {"stack", seed.stack}, {"slot", seed.slot}});
+                ReportProgram("defuser_encoder_seed", i, seed.code, module);
+            }
+        }
+        const auto feature = [&](std::string_view name, std::size_t count, bool unique) {
+            diagnostics::Write("native_feature_support",
+                {{"feature", name}, {"candidates", count},
+                    {"discovery_status",
+                        !count                     ? "missing path"
+                            : unique && count != 1 ? "ambiguous path"
+                                                   : "candidate available"},
+                    {"runtime_validated", false}});
+        };
+        feature("name", native.usernames.size(), true);
+        feature("health", native.health.size(), true);
+        feature("operator primary", native.selected_operator ? 1 : 0, true);
+        feature("operator common asset", native.operator_names.size(), false);
+        feature("team affiliation", native.affiliations.size(), false);
+        feature("defuser", native.defuser ? 1 : 0, true);
         diagnostics::Write("fixed_layout_assumptions",
             {{"camera_parent_field", "0xf00"}, {"camera_matrix_field", "0x2c0"}, {"pose_stride", "0x20"},
                 {"metadata_extent_field", "0x24"}, {"subtype_lower_field", "0x40"},
                 {"subtype_upper_field", "0x42"}});
+        diagnostics::Write("feature_layout_assumptions",
+            {{"team_source_parent_field", "0x48"}, {"weapon_source_parent_field", "0x48"},
+                {"reference_payload_field", 0u}, {"reference_flags_field", 8u},
+                {"reference_initialized_mask", "0x80000000"}, {"string_header_bytes", 16u},
+                {"name_maximum_bytes", 256u}, {"weapon_maximum_bytes", 24u},
+                {"health_maximum_exclusive_lower", 20u}, {"health_maximum_exclusive_upper", 300u},
+                {"weapon_methods_limit", 24u}, {"operator_methods_limit", 64u},
+                {"heap_string_contents_captured", false}});
     } catch (...) {
     }
 }

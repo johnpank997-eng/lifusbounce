@@ -191,6 +191,8 @@ struct Word {
 };
 
 struct Algebra {
+    bool complement{};
+
     struct Node {
         ZydisMnemonic operation{};
         Word left, right;
@@ -234,15 +236,40 @@ struct Algebra {
                     const bool same_mask = a.right == b.right ||
                         (a.right.terms.empty() && b.right.terms.empty() &&
                             (a.right.constant ^ b.right.constant) * multiple == 0);
-                    if (b.operation != ZYDIS_MNEMONIC_AND || a.left != b.left || !same_mask ||
-                        multiple != coefficient * (a.operation == ZYDIS_MNEMONIC_XOR ? 2 : 1))
+                    if (b.operation != ZYDIS_MNEMONIC_AND)
                         continue;
-                    const auto left = a.left, right = a.right;
+                    Word left, right;
+                    std::uint64_t right_coefficient = 1;
+                    if (a.left == b.left && same_mask &&
+                        multiple == coefficient * (a.operation == ZYDIS_MNEMONIC_XOR ? 2 : 1)) {
+                        left = a.left;
+                        right = a.right;
+                    } else if (complement && a.operation == ZYDIS_MNEMONIC_XOR &&
+                        multiple == coefficient * ~1ull) {
+                        const auto inverted = [](const Word& value) {
+                            Word result{~0ull};
+                            Add(result, value, ~0ull);
+                            return result;
+                        };
+                        const auto first = inverted(a.left), second = inverted(a.right);
+                        if ((first == b.left && a.right == b.right) ||
+                            (first == b.right && a.right == b.left)) {
+                            left = a.left;
+                            right = a.right;
+                        } else if ((second == b.left && a.left == b.right) ||
+                            (second == b.right && a.left == b.left)) {
+                            left = a.right;
+                            right = a.left;
+                        } else
+                            continue;
+                        right_coefficient = ~0ull;
+                    } else
+                        continue;
                     const auto amount = coefficient;
                     value.terms.erase(id);
                     value.terms.erase(other);
                     Add(value, left, amount);
-                    Add(value, right, amount);
+                    Add(value, right, amount * right_coefficient);
                     changed = true;
                     break;
                 }
@@ -338,9 +365,10 @@ struct Algebra {
     }
 };
 
-Emulator::Program Simplify(const Emulator::Program& source) {
+Emulator::Program Simplify(const Emulator::Program& source, bool complement = false) {
     auto result = source;
     Algebra math;
+    math.complement = complement;
     std::array<Word, 16> registers;
     const auto reset = [&] {
         for (auto& reg : registers)
@@ -1757,6 +1785,11 @@ std::vector<ArrayDescriptor> Arrays(const Emulator::Program& code, const NativeR
                         pointer.mem.disp.value == 0;
                 }))
                 ++next;
+            if (next != last && next->instruction.mnemonic == ZYDIS_MNEMONIC_ADD &&
+                next->operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER && next->operands[0].size == 32 &&
+                next->operands[0].reg.value == counter &&
+                next->operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && next->operands[1].imm.value.u == 7)
+                ++next;
             if (next == last)
                 continue;
             const auto& repeat = *next;
@@ -2394,7 +2427,12 @@ std::uint64_t DirectTarget(const Emulator::Decoded& d) {
         : 0;
 }
 
-std::optional<OperatorNameDescriptor> NullableResource(const Emulator::Program& code, bool two_casts) {
+std::optional<OperatorNameDescriptor> BoundedNullableResource(const Emulator::Program& code);
+bool OperatorNull(const Emulator::Program& code, std::size_t branch, ZydisRegister holder);
+bool ResourceReturns(const Emulator::Program& code, std::size_t start, ZydisRegister holder,
+    const std::array<std::uint64_t, 4>& bounds);
+
+std::optional<OperatorNameDescriptor> LegacyNullableResource(const Emulator::Program& code, bool two_casts) {
     const auto& ins = code.instructions;
     std::vector<std::uint64_t> bounds;
     for (const auto& d : ins)
@@ -2459,13 +2497,37 @@ std::optional<OperatorNameDescriptor> NullableResource(const Emulator::Program& 
     }
     return std::nullopt;
 }
+
+std::optional<OperatorNameDescriptor> NullableResource(const Emulator::Program& code, bool two_casts) {
+    if (auto value = LegacyNullableResource(code, two_casts)) {
+        if (!two_casts)
+            return value;
+        std::vector<std::uint64_t> found;
+        bool widths = true;
+        for (const auto& d : code.instructions) {
+            for (const auto& operand : d.operands)
+                if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY && operand.mem.type == ZYDIS_MEMOP_TYPE_MEM)
+                    widths &= d.instruction.address_width == 64;
+            if (d.instruction.mnemonic == ZYDIS_MNEMONIC_CMP && d.operands[0].size == 16 && RipTarget(d, 1))
+                found.push_back(RipTarget(d, 1));
+        }
+        if (widths && found.size() == 4)
+            for (std::size_t at = 0; at < code.instructions.size(); ++at)
+                if (code.instructions[at].address == value->reference.code.end &&
+                    OperatorNull(code, at, value->reference.output.reg) &&
+                    ResourceReturns(
+                        code, at, value->reference.output.reg, {found[0], found[1], found[2], found[3]}))
+                    return value;
+    }
+    return two_casts ? BoundedNullableResource(code) : std::nullopt;
+}
 }
 
 std::optional<OperatorNameDescriptor> OperatorName(const Emulator::Program& getter) {
     return NullableResource(getter, true);
 }
 
-std::optional<OperatorSelectionDescriptor> OperatorSelection(const Emulator::Program& code,
+static std::optional<OperatorSelectionDescriptor> LegacyOperatorSelection(const Emulator::Program& code,
     std::span<const std::byte> bytes, std::uint32_t code_rva, std::uint64_t module,
     std::span<const FunctionRecord> functions, std::uint64_t missing_instance_string) {
     const auto& ins = code.instructions;
@@ -2604,16 +2666,694 @@ std::optional<OperatorSelectionDescriptor> OperatorSelection(const Emulator::Pro
     return accepted;
 }
 
+namespace {
+std::optional<std::size_t> OperatorWrite(
+    const Emulator::Program& code, std::size_t before, ZydisRegister reg) {
+    const auto dependency = Dependency(reg);
+    if (!dependency)
+        return std::nullopt;
+    for (std::size_t at = before; at > 0; --at)
+        for (const auto& operand : code.instructions[at - 1].operands)
+            if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+                Dependency(operand.reg.value) == dependency)
+                return at - 1;
+    return std::nullopt;
+}
+
+std::optional<std::pair<std::uint32_t, std::size_t>> OperatorValue(
+    const Emulator::Program& code, std::size_t before, ZydisRegister reg, bool zero, unsigned budget = 32) {
+    if (!budget || !Dependency(reg) || ZydisRegisterGetWidth(ZYDIS_MACHINE_MODE_LONG_64, reg) != 64)
+        return std::nullopt;
+    const auto writer = OperatorWrite(code, before, reg);
+    if (!writer)
+        return std::pair{Dependency(reg), code.instructions.size()};
+    const auto& at = code.instructions[*writer];
+    const auto& output = at.operands[0];
+    if (output.type != ZYDIS_OPERAND_TYPE_REGISTER || output.size != 64 || output.reg.value != reg)
+        return std::nullopt;
+    if (at.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && at.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+        at.operands[1].size == 64)
+        return OperatorValue(code, *writer, at.operands[1].reg.value, zero, budget - 1);
+    if (zero &&
+        (at.instruction.mnemonic == ZYDIS_MNEMONIC_ROL || at.instruction.mnemonic == ZYDIS_MNEMONIC_ROR ||
+            at.instruction.mnemonic == ZYDIS_MNEMONIC_NEG))
+        return OperatorValue(code, *writer, reg, true, budget - 1);
+    return std::pair{Dependency(reg), *writer};
+}
+
+bool OperatorNull(const Emulator::Program& code, std::size_t branch, ZydisRegister holder) {
+    const auto& ins = code.instructions;
+    std::optional<std::size_t> producer;
+    for (std::size_t at = branch; at > 0 && branch - at < 16; --at) {
+        const auto& instruction = ins[at - 1].instruction;
+        if (instruction.meta.category == ZYDIS_CATEGORY_CALL ||
+            instruction.meta.category == ZYDIS_CATEGORY_COND_BR ||
+            instruction.meta.category == ZYDIS_CATEGORY_UNCOND_BR)
+            return false;
+        if (instruction.cpu_flags &&
+            ((instruction.cpu_flags->modified | instruction.cpu_flags->set_0 | instruction.cpu_flags->set_1 |
+                 instruction.cpu_flags->undefined) &
+                ZYDIS_CPUFLAG_ZF)) {
+            if (!(instruction.cpu_flags->modified & ZYDIS_CPUFLAG_ZF))
+                return false;
+            producer = at - 1;
+            break;
+        }
+    }
+    if (!producer)
+        return false;
+    const auto& at = ins[*producer];
+    const auto& a = at.operands[0];
+    const auto& b = at.operands[1];
+    const auto output = OperatorValue(code, branch, holder, true);
+    if (!output)
+        return false;
+    if (at.instruction.mnemonic == ZYDIS_MNEMONIC_TEST && a.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+        b.type == ZYDIS_OPERAND_TYPE_REGISTER && a.size == 64 && b.size == 64 && a.reg.value == b.reg.value)
+        return output == OperatorValue(code, *producer, a.reg.value, true);
+    if ((at.instruction.mnemonic == ZYDIS_MNEMONIC_ADD || at.instruction.mnemonic == ZYDIS_MNEMONIC_SUB ||
+            at.instruction.mnemonic == ZYDIS_MNEMONIC_XOR) &&
+        a.type == ZYDIS_OPERAND_TYPE_REGISTER && a.size == 64)
+        return output == OperatorValue(code, *producer + 1, a.reg.value, true);
+    if (at.instruction.mnemonic != ZYDIS_MNEMONIC_CMP || a.type != ZYDIS_OPERAND_TYPE_REGISTER ||
+        a.size != 64)
+        return false;
+    if (b.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !b.imm.is_relative && b.imm.value.u == 0)
+        return output == OperatorValue(code, *producer, a.reg.value, true);
+    if (b.type != ZYDIS_OPERAND_TYPE_REGISTER || b.size != 64 || output->second >= ins.size())
+        return false;
+    const auto& difference = ins[output->second];
+    if (difference.instruction.mnemonic != ZYDIS_MNEMONIC_SUB ||
+        difference.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || difference.operands[0].size != 64 ||
+        difference.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER || difference.operands[1].size != 64)
+        return false;
+    const auto left = OperatorValue(code, output->second, difference.operands[0].reg.value, false);
+    const auto right = OperatorValue(code, output->second, difference.operands[1].reg.value, false);
+    const auto compared_left = OperatorValue(code, *producer, a.reg.value, false);
+    const auto compared_right = OperatorValue(code, *producer, b.reg.value, false);
+    return left && right && compared_left && compared_right &&
+        ((left == compared_left && right == compared_right) ||
+            (left == compared_right && right == compared_left));
+}
+
+bool ResourceReturns(const Emulator::Program& code, std::size_t start, ZydisRegister holder,
+    const std::array<std::uint64_t, 4>& bounds) {
+    enum class Value : unsigned char { unknown, wrapper, payload, table, metadata, lower, upper, zero };
+
+    struct State {
+        std::size_t at;
+        std::array<Value, 16> values{};
+        std::array<std::uint64_t, 16> origins{};
+        std::array<std::int64_t, 16> links{};
+        unsigned gates{};
+        std::optional<unsigned> flags;
+        std::uint64_t flag_origin{};
+        std::int64_t flag_link{};
+        std::array<std::uint64_t, 4> gate_origins{};
+        std::array<std::int64_t, 4> gate_links{};
+
+        bool operator<(const State& other) const {
+            return std::tie(at, values, origins, links, gates, flags, flag_origin, flag_link, gate_origins,
+                       gate_links) < std::tie(other.at, other.values, other.origins, other.links, other.gates,
+                                         other.flags, other.flag_origin, other.flag_link, other.gate_origins,
+                                         other.gate_links);
+        }
+    };
+
+    const auto index = [](ZydisRegister reg) -> unsigned {
+        const auto largest = ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, reg);
+        return largest >= ZYDIS_REGISTER_RAX && largest <= ZYDIS_REGISTER_R15
+            ? unsigned(largest - ZYDIS_REGISTER_RAX)
+            : 16;
+    };
+    const auto& ins = code.instructions;
+    const auto target = [&](std::uint64_t address) -> std::optional<std::size_t> {
+        const auto found = std::lower_bound(ins.begin(), ins.end(), address,
+            [](const auto& value, auto needle) { return value.address < needle; });
+        return found != ins.end() && found->address == address
+            ? std::optional<std::size_t>(found - ins.begin())
+            : std::nullopt;
+    };
+    if (start >= ins.size() || index(holder) >= 16)
+        return false;
+    State entry{start};
+    entry.values[index(holder)] = Value::wrapper;
+    std::vector<State> pending{entry};
+    std::set<State> visited;
+    bool returned{};
+    while (!pending.empty() && visited.size() < 4096) {
+        auto state = pending.back();
+        pending.pop_back();
+        if (state.at >= ins.size())
+            return false;
+        if (!visited.insert(state).second)
+            continue;
+        const auto& d = ins[state.at];
+        const auto before = state.values;
+        const auto before_origins = state.origins;
+        const auto before_links = state.links;
+        for (const auto& operand : d.operands)
+            if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) && index(operand.reg.value) < 16) {
+                state.values[index(operand.reg.value)] = Value::unknown;
+                state.origins[index(operand.reg.value)] = 0;
+                state.links[index(operand.reg.value)] = 0;
+            }
+        if (d.instruction.cpu_flags &&
+            (d.instruction.cpu_flags->modified | d.instruction.cpu_flags->set_0 |
+                d.instruction.cpu_flags->set_1 | d.instruction.cpu_flags->undefined))
+            state.flags.reset();
+        const auto& a = d.operands[0];
+        const auto& b = d.operands[1];
+        if (a.type == ZYDIS_OPERAND_TYPE_REGISTER && index(a.reg.value) < 16) {
+            auto& value = state.values[index(a.reg.value)];
+            if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && a.size == 64 &&
+                b.type == ZYDIS_OPERAND_TYPE_REGISTER && b.size == 64 && index(b.reg.value) < 16) {
+                value = before[index(b.reg.value)];
+                state.origins[index(a.reg.value)] = before_origins[index(b.reg.value)];
+                state.links[index(a.reg.value)] = before_links[index(b.reg.value)];
+            } else if ((d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV ||
+                           d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVZX) &&
+                d.instruction.address_width == 64 && b.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                b.mem.index == ZYDIS_REGISTER_NONE && b.mem.segment != ZYDIS_REGISTER_FS &&
+                b.mem.segment != ZYDIS_REGISTER_GS && index(b.mem.base) < 16) {
+                const auto base = before[index(b.mem.base)];
+                if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && a.size == 64 && b.size == 64) {
+                    if (base == Value::wrapper && b.mem.disp.value == 0) {
+                        value = Value::payload;
+                        state.origins[index(a.reg.value)] = d.address;
+                        if (a.reg.value == ZYDIS_REGISTER_RAX)
+                            state.gates = 0;
+                    } else if (base == Value::payload && b.mem.disp.value == 0) {
+                        value = Value::table;
+                        state.origins[index(a.reg.value)] = before_origins[index(b.mem.base)];
+                    } else if (base == Value::table && b.mem.disp.value >= 0 && b.mem.disp.value < 0x1000 &&
+                        !(b.mem.disp.value & 7)) {
+                        value = Value::metadata;
+                        state.origins[index(a.reg.value)] = before_origins[index(b.mem.base)];
+                        state.links[index(a.reg.value)] = b.mem.disp.value;
+                    }
+                } else if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVZX && a.size == 32 && b.size == 16 &&
+                    base == Value::metadata) {
+                    value = b.mem.disp.value == 0x40 ? Value::lower
+                        : b.mem.disp.value == 0x42   ? Value::upper
+                                                     : Value::unknown;
+                    state.origins[index(a.reg.value)] = before_origins[index(b.mem.base)];
+                    state.links[index(a.reg.value)] = before_links[index(b.mem.base)];
+                }
+            } else if ((d.instruction.mnemonic == ZYDIS_MNEMONIC_XOR ||
+                           d.instruction.mnemonic == ZYDIS_MNEMONIC_SUB) &&
+                a.size >= 32 && b.type == ZYDIS_OPERAND_TYPE_REGISTER && b.reg.value == a.reg.value)
+                value = Value::zero;
+            else if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV && a.size >= 32 &&
+                b.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !b.imm.value.u)
+                value = Value::zero;
+        }
+        if (d.instruction.address_width == 64 && d.instruction.mnemonic == ZYDIS_MNEMONIC_CMP &&
+            a.type == ZYDIS_OPERAND_TYPE_REGISTER && a.size == 16 && index(a.reg.value) < 16 &&
+            b.size == 16 && b.mem.segment != ZYDIS_REGISTER_FS && b.mem.segment != ZYDIS_REGISTER_GS &&
+            RipTarget(d, 1))
+            for (unsigned gate = 0; gate < bounds.size(); ++gate)
+                if (RipTarget(d, 1) == bounds[gate] &&
+                    before[index(a.reg.value)] == (gate & 1 ? Value::upper : Value::lower)) {
+                    state.flags = gate;
+                    state.flag_origin = before_origins[index(a.reg.value)];
+                    state.flag_link = before_links[index(a.reg.value)];
+                }
+        const auto category = d.instruction.meta.category;
+        if (category == ZYDIS_CATEGORY_CALL) {
+            state.flags.reset();
+            for (const auto reg : {ZYDIS_REGISTER_RAX, ZYDIS_REGISTER_RCX, ZYDIS_REGISTER_RDX,
+                     ZYDIS_REGISTER_R8, ZYDIS_REGISTER_R9, ZYDIS_REGISTER_R10, ZYDIS_REGISTER_R11}) {
+                state.values[index(reg)] = Value::unknown;
+                state.origins[index(reg)] = 0;
+                state.links[index(reg)] = 0;
+            }
+        }
+        if (category == ZYDIS_CATEGORY_RET) {
+            const auto value = state.values[index(ZYDIS_REGISTER_RAX)];
+            if (value != Value::zero && (value != Value::payload || state.gates != 15))
+                return false;
+            if (value == Value::payload)
+                for (unsigned gate = 0; gate < 4; ++gate)
+                    if (state.gate_origins[gate] != state.origins[index(ZYDIS_REGISTER_RAX)] ||
+                        state.gate_links[gate] != state.gate_links[0])
+                        return false;
+            returned |= value == Value::payload;
+            continue;
+        }
+        if (category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR) {
+            const auto destination = target(DirectTarget(d));
+            if (!destination)
+                return false;
+            auto branch = state;
+            branch.at = *destination;
+            if (state.flags) {
+                const auto gate = *state.flags;
+                const auto verify = [&](State& selected) {
+                    selected.gates |= 1u << gate;
+                    selected.gate_origins[gate] = state.flag_origin;
+                    selected.gate_links[gate] = state.flag_link;
+                };
+                if (!(gate & 1) && d.instruction.mnemonic == ZYDIS_MNEMONIC_JB)
+                    verify(state);
+                else if (!(gate & 1) && d.instruction.mnemonic == ZYDIS_MNEMONIC_JNB)
+                    verify(branch);
+                else if ((gate & 1) && d.instruction.mnemonic == ZYDIS_MNEMONIC_JNBE)
+                    verify(state);
+                else if ((gate & 1) && d.instruction.mnemonic == ZYDIS_MNEMONIC_JBE)
+                    verify(branch);
+            }
+            pending.push_back(branch);
+            if (category == ZYDIS_CATEGORY_UNCOND_BR)
+                continue;
+        }
+        ++state.at;
+        pending.push_back(state);
+    }
+    return returned && pending.empty();
+}
+
+std::optional<OperatorNameDescriptor> BoundedNullableResource(const Emulator::Program& code) {
+    const auto& ins = code.instructions;
+    if (ins.empty() || ins.size() > 1024 || code.end - code.begin >= 0x1000)
+        return std::nullopt;
+    std::vector<std::uint64_t> found;
+    for (const auto& d : ins)
+        if (d.instruction.mnemonic == ZYDIS_MNEMONIC_CMP && d.operands[0].size == 16 &&
+            d.operands[1].size == 16 && RipTarget(d, 1))
+            found.push_back(RipTarget(d, 1));
+    if (found.size() != 4 || found[1] != found[0] + 2 || found[3] != found[2] + 2 || found[0] == found[2])
+        return std::nullopt;
+    const std::array<std::uint64_t, 4> bounds{found[0], found[1], found[2], found[3]};
+    std::optional<OperatorNameDescriptor> accepted;
+    for (std::size_t payload = 0; payload < ins.size(); ++payload) {
+        const auto& d = ins[payload];
+        const auto& source = d.operands[1];
+        if (d.instruction.address_width != 64 || d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+            d.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+            d.operands[0].reg.value != ZYDIS_REGISTER_RAX || d.operands[0].size != 64 ||
+            source.type != ZYDIS_OPERAND_TYPE_MEMORY || source.size != 64 ||
+            source.mem.index != ZYDIS_REGISTER_NONE || source.mem.disp.value != 0 ||
+            source.mem.segment == ZYDIS_REGISTER_FS || source.mem.segment == ZYDIS_REGISTER_GS)
+            continue;
+        for (std::size_t branch = 1; branch < payload; ++branch) {
+            if ((ins[branch].instruction.mnemonic != ZYDIS_MNEMONIC_JZ &&
+                    ins[branch].instruction.mnemonic != ZYDIS_MNEMONIC_JNZ) ||
+                !OperatorNull(code, branch, source.mem.base))
+                continue;
+            auto path = Flow(code, 0, branch, {ZYDIS_REGISTER_RCX}, {source.mem.base});
+            if (!path || !ResourceReturns(code, branch, source.mem.base, bounds))
+                continue;
+            std::set<std::uint32_t> fields;
+            for (const auto& at : path->code.instructions)
+                for (const auto& operand : at.operands)
+                    if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY && operand.size == 64 &&
+                        operand.mem.base == ZYDIS_REGISTER_RCX && operand.mem.index == ZYDIS_REGISTER_NONE &&
+                        operand.mem.disp.value > 0 && operand.mem.disp.value < 0x10000 &&
+                        operand.mem.segment != ZYDIS_REGISTER_FS &&
+                        operand.mem.segment != ZYDIS_REGISTER_GS &&
+                        (operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ))
+                        fields.insert(static_cast<std::uint32_t>(operand.mem.disp.value));
+            if (fields.size() != 1 || accepted)
+                return std::nullopt;
+            accepted = OperatorNameDescriptor{std::move(*path), *fields.begin(), code.begin, bounds[2]};
+        }
+    }
+    return accepted;
+}
+
+bool OperatorPayload(const Emulator::Program& code, std::size_t retain, std::size_t member,
+    ZydisRegister holder, ZydisRegister input) {
+    const auto& ins = code.instructions;
+
+    struct State {
+        std::size_t at;
+        std::uint32_t aliases;
+        bool holder_stable;
+
+        bool operator<(const State& other) const {
+            return std::tie(at, aliases, holder_stable) <
+                std::tie(other.at, other.aliases, other.holder_stable);
+        }
+    };
+
+    const auto target = [&](std::uint64_t address) -> std::optional<std::size_t> {
+        const auto found = std::lower_bound(ins.begin(), ins.end(), address,
+            [](const auto& value, auto needle) { return value.address < needle; });
+        return found != ins.end() && found->address == address
+            ? std::optional<std::size_t>(found - ins.begin())
+            : std::nullopt;
+    };
+    std::set<State> visited;
+    std::vector<State> pending{{retain + 1, 0, true}};
+    for (std::size_t next = 0; next < pending.size() && visited.size() < 512; ++next) {
+        auto state = pending[next];
+        if (state.at >= ins.size() || !visited.insert(state).second)
+            continue;
+        if (state.at == member && (state.aliases & Dependency(input)))
+            return true;
+        const auto& instruction = ins[state.at];
+        const auto before = state.aliases;
+        const auto holder_before = state.holder_stable;
+        for (const auto& operand : instruction.operands)
+            if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                (operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE)) {
+                state.aliases &= ~Dependency(operand.reg.value);
+                if (Dependency(operand.reg.value) == Dependency(holder))
+                    state.holder_stable = false;
+            }
+        if (instruction.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+            instruction.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            instruction.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            instruction.operands[0].size == 64 && instruction.operands[1].size == 64 &&
+            (before & Dependency(instruction.operands[1].reg.value)))
+            state.aliases |= Dependency(instruction.operands[0].reg.value);
+        const auto& source = instruction.operands[1];
+        if (holder_before && instruction.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+            instruction.instruction.address_width == 64 &&
+            instruction.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+            instruction.operands[0].size == 64 && source.type == ZYDIS_OPERAND_TYPE_MEMORY &&
+            source.size == 64 && source.mem.base == holder && source.mem.index == ZYDIS_REGISTER_NONE &&
+            source.mem.disp.value == 0 && source.mem.segment != ZYDIS_REGISTER_FS &&
+            source.mem.segment != ZYDIS_REGISTER_GS)
+            state.aliases |= Dependency(instruction.operands[0].reg.value);
+        const auto category = instruction.instruction.meta.category;
+        if (category == ZYDIS_CATEGORY_CALL) {
+            const auto volatile_registers = Dependency(ZYDIS_REGISTER_RAX) | Dependency(ZYDIS_REGISTER_RCX) |
+                Dependency(ZYDIS_REGISTER_RDX) | Dependency(ZYDIS_REGISTER_R8) |
+                Dependency(ZYDIS_REGISTER_R9) | Dependency(ZYDIS_REGISTER_R10) |
+                Dependency(ZYDIS_REGISTER_R11);
+            state.aliases &= ~volatile_registers;
+            if (Dependency(holder) & volatile_registers)
+                state.holder_stable = false;
+        }
+        if (instruction.instruction.mnemonic == ZYDIS_MNEMONIC_RET)
+            continue;
+        if (category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR) {
+            if (const auto destination = target(DirectTarget(instruction)))
+                pending.push_back({*destination, state.aliases, state.holder_stable});
+            if (category == ZYDIS_CATEGORY_UNCOND_BR)
+                continue;
+        }
+        pending.push_back({state.at + 1, state.aliases, state.holder_stable});
+    }
+    return false;
+}
+
+bool OperatorMember(const PointerDescriptor& path, std::uint64_t member) {
+    if (path.input.stack || path.output.stack)
+        return false;
+    std::set<std::uint64_t> reads;
+    const auto evaluate = [&](const Emulator::Program& code, std::uint32_t supplied,
+                              const std::map<std::int64_t, bool>& supplied_slots) {
+        std::uint32_t dependent = Dependency(path.input.reg) | supplied;
+        auto slots = supplied_slots;
+        for (const auto& value : code.instructions) {
+            bool derived{};
+            for (unsigned at = 0; at < value.instruction.operand_count; ++at) {
+                const auto& operand = value.operands[at];
+                if (!(operand.actions & ZYDIS_OPERAND_ACTION_MASK_READ))
+                    continue;
+                if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER)
+                    derived |= (dependent & Dependency(operand.reg.value)) != 0;
+                else if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY) {
+                    const bool address =
+                        (dependent & (Dependency(operand.mem.base) | Dependency(operand.mem.index))) != 0;
+                    if (address && value.instruction.mnemonic != ZYDIS_MNEMONIC_LEA &&
+                        operand.mem.index == ZYDIS_REGISTER_NONE && operand.mem.disp.value >= 0 &&
+                        operand.mem.disp.value < 0x10000)
+                        reads.insert(value.address);
+                    derived |= address || (LocalSlot(operand) && slots[operand.mem.disp.value]);
+                }
+            }
+            if (value.instruction.mnemonic == ZYDIS_MNEMONIC_XOR &&
+                value.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                value.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                value.operands[0].reg.value == value.operands[1].reg.value)
+                derived = false;
+            for (unsigned at = 0; at < value.instruction.operand_count; ++at) {
+                const auto& operand = value.operands[at];
+                if (!(operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE))
+                    continue;
+                if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER) {
+                    dependent &= ~Dependency(operand.reg.value);
+                    if (derived)
+                        dependent |= Dependency(operand.reg.value);
+                } else if (LocalSlot(operand))
+                    slots[operand.mem.disp.value] = derived;
+            }
+        }
+        return std::pair{dependent, std::move(slots)};
+    };
+    std::uint32_t seeds{};
+    std::map<std::int64_t, bool> seed_slots;
+    for (const auto& seed : path.seeds) {
+        const auto [dependent, slots] = evaluate(seed.value.code, 0, {});
+        if (seed.target.stack) {
+            const auto found = slots.find(seed.target.slot);
+            seed_slots[seed.target.slot] = found != slots.end() && found->second;
+        } else if (dependent & Dependency(seed.value.output))
+            seeds |= Dependency(seed.target.reg);
+    }
+    evaluate(path.code, seeds, seed_slots);
+    return reads.size() == 1 && reads.contains(member);
+}
+
+std::optional<OperatorSelectionDescriptor> BoundedOperatorSelection(const Emulator::Program& code,
+    std::uint64_t missing_instance_string, const ValidationObserver& validation) {
+    const auto& ins = code.instructions;
+    const auto report = [&](std::string_view rule, std::uint64_t address, std::uint64_t observed) {
+        if (validation)
+            validation(rule, address, observed);
+    };
+    if (ins.empty() || ins.size() > 4096)
+        return std::nullopt;
+    const auto index = [&](std::uint64_t address) -> std::optional<std::size_t> {
+        const auto found = std::lower_bound(ins.begin(), ins.end(), address,
+            [](const auto& value, auto needle) { return value.address < needle; });
+        return found != ins.end() && found->address == address
+            ? std::optional<std::size_t>(found - ins.begin())
+            : std::nullopt;
+    };
+    const auto member_operand = [&](const auto& operand) {
+        return operand.type == ZYDIS_OPERAND_TYPE_MEMORY && operand.size == 64 &&
+            operand.mem.index == ZYDIS_REGISTER_NONE && Dependency(operand.mem.base) &&
+            operand.mem.base != ZYDIS_REGISTER_RSP && operand.mem.disp.value >= 8 &&
+            operand.mem.disp.value < 0x10000 && operand.mem.segment != ZYDIS_REGISTER_FS &&
+            operand.mem.segment != ZYDIS_REGISTER_GS;
+    };
+    std::optional<OperatorSelectionDescriptor> accepted;
+    for (std::size_t end = 1; end + 1 < ins.size(); ++end) {
+        const auto& branch = ins[end];
+        std::optional<std::size_t> retain, failure;
+        if (branch.instruction.mnemonic == ZYDIS_MNEMONIC_JZ) {
+            retain = end + 1;
+            failure = index(DirectTarget(branch));
+        } else if (branch.instruction.mnemonic == ZYDIS_MNEMONIC_JNZ) {
+            retain = index(DirectTarget(branch));
+            failure = end + 1;
+        }
+        if (!retain || !failure || *retain + 2 >= ins.size() ||
+            ins[*failure].instruction.mnemonic != ZYDIS_MNEMONIC_LEA ||
+            RipTarget(ins[*failure], 1) != missing_instance_string)
+            continue;
+        const auto& reference = ins[*retain];
+        const auto& object_check = ins[*retain + 1];
+        const auto& object_branch = ins[*retain + 2];
+        const auto& holder_memory = reference.operands[0];
+        if (reference.instruction.mnemonic != ZYDIS_MNEMONIC_INC ||
+            reference.instruction.address_width != 64 || object_check.instruction.address_width != 64 ||
+            !(reference.instruction.attributes & ZYDIS_ATTRIB_HAS_LOCK) ||
+            holder_memory.type != ZYDIS_OPERAND_TYPE_MEMORY || holder_memory.size != 64 ||
+            holder_memory.mem.index != ZYDIS_REGISTER_NONE || holder_memory.mem.disp.value != 8 ||
+            holder_memory.mem.segment == ZYDIS_REGISTER_FS ||
+            holder_memory.mem.segment == ZYDIS_REGISTER_GS || !Dependency(holder_memory.mem.base) ||
+            object_check.instruction.mnemonic != ZYDIS_MNEMONIC_CMP ||
+            object_check.operands[0].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+            object_check.operands[0].size != 64 ||
+            object_check.operands[0].mem.base != holder_memory.mem.base ||
+            object_check.operands[0].mem.index != ZYDIS_REGISTER_NONE ||
+            object_check.operands[0].mem.disp.value != 0 ||
+            object_check.operands[0].mem.segment == ZYDIS_REGISTER_FS ||
+            object_check.operands[0].mem.segment == ZYDIS_REGISTER_GS ||
+            object_check.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+            object_check.operands[1].imm.is_relative || object_check.operands[1].imm.value.u != 0 ||
+            object_branch.instruction.mnemonic != ZYDIS_MNEMONIC_JZ ||
+            DirectTarget(object_branch) != ins[*failure].address ||
+            !OperatorNull(code, end, holder_memory.mem.base)) {
+            report("operator_selection_holder_gate_rejected", branch.address, *retain);
+            continue;
+        }
+        std::optional<PointerDescriptor> instance;
+        std::optional<std::uint32_t> instance_field;
+        for (std::size_t member = end; member > 0 && end - member < 384; --member) {
+            const auto& at = ins[member - 1];
+            for (unsigned operand = 0; operand < at.instruction.operand_count_visible; ++operand) {
+                const auto& source = at.operands[operand];
+                if (at.instruction.address_width != 64 || !member_operand(source) ||
+                    !(source.actions & ZYDIS_OPERAND_ACTION_MASK_READ))
+                    continue;
+                auto path = Flow(code, member - 1, end, {source.mem.base}, {holder_memory.mem.base});
+                if (!path || !OperatorMember(*path, at.address) ||
+                    std::none_of(path->code.instructions.begin(), path->code.instructions.end(),
+                        [&](const auto& value) { return value.address == at.address; })) {
+                    report("operator_selection_instance_flow_rejected", at.address, source.mem.disp.value);
+                    continue;
+                }
+                if (instance) {
+                    report("operator_selection_instance_ambiguous", at.address, source.mem.disp.value);
+                    return std::nullopt;
+                }
+                instance = std::move(path);
+                instance_field = static_cast<std::uint32_t>(source.mem.disp.value);
+            }
+        }
+        if (!instance) {
+            report("operator_selection_instance_missing", branch.address, *retain);
+            continue;
+        }
+        std::optional<OperatorNameDescriptor> definition;
+        for (std::size_t gate = *retain + 5; gate + 4 < ins.size(); ++gate) {
+            if (ins[gate].instruction.mnemonic != ZYDIS_MNEMONIC_CMP || ins[gate].operands[0].size != 16 ||
+                !RipTarget(ins[gate], 1) || ins[gate + 1].instruction.mnemonic != ZYDIS_MNEMONIC_JB ||
+                ins[gate + 3].instruction.mnemonic != ZYDIS_MNEMONIC_CMP ||
+                ins[gate + 3].operands[0].size != 16 ||
+                RipTarget(ins[gate + 3], 1) != RipTarget(ins[gate], 1) + 2 ||
+                (ins[gate + 4].instruction.mnemonic != ZYDIS_MNEMONIC_JBE &&
+                    (ins[gate + 4].instruction.mnemonic != ZYDIS_MNEMONIC_JNBE ||
+                        DirectTarget(ins[gate + 4]) != DirectTarget(ins[gate + 1]))))
+                continue;
+            const auto& table = ins[gate - 3];
+            const auto& info = ins[gate - 2];
+            const auto& lower = ins[gate - 1];
+            const auto& upper = ins[gate + 2];
+            const auto memory = [](const auto& value, ZydisRegister base, std::int64_t field, unsigned bits) {
+                return value.type == ZYDIS_OPERAND_TYPE_MEMORY && value.size == bits &&
+                    value.mem.base == base && value.mem.index == ZYDIS_REGISTER_NONE &&
+                    value.mem.disp.value == field && value.mem.segment != ZYDIS_REGISTER_FS &&
+                    value.mem.segment != ZYDIS_REGISTER_GS;
+            };
+            const auto reg = [](const auto& value, unsigned bits) {
+                return value.type == ZYDIS_OPERAND_TYPE_REGISTER && value.size == bits &&
+                    Dependency(value.reg.value);
+            };
+            const auto interval = [&](const auto& value, const auto& compare, std::int64_t field) {
+                return value.instruction.mnemonic == ZYDIS_MNEMONIC_MOVZX &&
+                    value.instruction.address_width == 64 && reg(value.operands[0], 32) &&
+                    memory(value.operands[1], info.operands[0].reg.value, field, 16) &&
+                    compare.instruction.address_width == 64 && reg(compare.operands[0], 16) &&
+                    Dependency(compare.operands[0].reg.value) == Dependency(value.operands[0].reg.value) &&
+                    memory(compare.operands[1], ZYDIS_REGISTER_RIP, compare.operands[1].mem.disp.value, 16);
+            };
+            if (table.instruction.mnemonic != ZYDIS_MNEMONIC_MOV || table.instruction.address_width != 64 ||
+                !reg(table.operands[0], 64) || table.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+                !Dependency(table.operands[1].mem.base) ||
+                !memory(table.operands[1], table.operands[1].mem.base, 0, 64) ||
+                info.instruction.mnemonic != ZYDIS_MNEMONIC_MOV || info.instruction.address_width != 64 ||
+                !reg(info.operands[0], 64) || info.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+                info.operands[1].mem.disp.value < 8 || info.operands[1].mem.disp.value >= 0x100 ||
+                info.operands[1].mem.disp.value % 8 != 0 ||
+                !memory(info.operands[1], table.operands[0].reg.value, info.operands[1].mem.disp.value, 64) ||
+                !interval(lower, ins[gate], 0x40) || !interval(upper, ins[gate + 3], 0x42)) {
+                report("operator_selection_definition_type_rejected", ins[gate].address,
+                    RipTarget(ins[gate], 1));
+                continue;
+            }
+            const auto payload = OperatorWrite(code, gate - 3, table.operands[1].mem.base);
+            if (!payload || *payload <= *retain || ins[*payload].instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+                ins[*payload].instruction.address_width != 64 ||
+                ins[*payload].operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                ins[*payload].operands[0].size != 64 ||
+                ins[*payload].operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+                ins[*payload].operands[1].size != 64 ||
+                ins[*payload].operands[1].mem.index != ZYDIS_REGISTER_NONE ||
+                ins[*payload].operands[1].mem.disp.value != 0 ||
+                ins[*payload].operands[1].mem.segment == ZYDIS_REGISTER_FS ||
+                ins[*payload].operands[1].mem.segment == ZYDIS_REGISTER_GS)
+                continue;
+            const auto reference_register = ins[*payload].operands[1].mem.base;
+            for (std::size_t null_gate = *payload; null_gate > *retain + 3 && *payload - null_gate < 128;
+                --null_gate) {
+                const auto& null_branch = ins[null_gate - 1];
+                const auto failure_address = DirectTarget(ins[gate + 1]);
+                const auto routes_failure = (null_branch.instruction.mnemonic == ZYDIS_MNEMONIC_JZ &&
+                                                DirectTarget(null_branch) == failure_address) ||
+                    (null_branch.instruction.mnemonic == ZYDIS_MNEMONIC_JNZ &&
+                        ins[null_gate].address == failure_address && index(DirectTarget(null_branch)));
+                if (!routes_failure || !OperatorNull(code, null_gate - 1, reference_register))
+                    continue;
+                for (std::size_t member = null_gate - 1; member > *retain + 3 && null_gate - member < 256;
+                    --member) {
+                    const auto& at = ins[member - 1];
+                    for (unsigned operand = 0; operand < at.instruction.operand_count_visible; ++operand) {
+                        const auto& source = at.operands[operand];
+                        if (!member_operand(source) || !(source.actions & ZYDIS_OPERAND_ACTION_MASK_READ) ||
+                            !OperatorPayload(
+                                code, *retain, member - 1, holder_memory.mem.base, source.mem.base))
+                            continue;
+                        auto path =
+                            Flow(code, member - 1, null_gate - 1, {source.mem.base}, {reference_register});
+                        if (!path || !OperatorMember(*path, at.address) ||
+                            std::none_of(path->code.instructions.begin(), path->code.instructions.end(),
+                                [&](const auto& value) { return value.address == at.address; })) {
+                            report("operator_selection_definition_flow_rejected", at.address,
+                                source.mem.disp.value);
+                            continue;
+                        }
+                        if (definition) {
+                            report(
+                                "operator_selection_definition_ambiguous", at.address, source.mem.disp.value);
+                            return std::nullopt;
+                        }
+                        definition = OperatorNameDescriptor{std::move(*path),
+                            static_cast<std::uint32_t>(source.mem.disp.value), code.begin,
+                            RipTarget(ins[gate], 1)};
+                    }
+                }
+            }
+        }
+        if (!definition) {
+            report("operator_selection_definition_missing", branch.address, *retain);
+            continue;
+        }
+        if (accepted) {
+            report("operator_selection_consumer_ambiguous", branch.address, *retain);
+            return std::nullopt;
+        }
+        accepted = OperatorSelectionDescriptor{std::move(*instance), std::move(definition->reference),
+            *instance_field, definition->field, code.begin, definition->target_type};
+    }
+    report(accepted ? "operator_selection_bounded_accepted" : "operator_selection_bounded_rejected",
+        code.begin, accepted ? accepted->instance_field : ins.size());
+    return accepted;
+}
+}
+
+std::optional<OperatorSelectionDescriptor> OperatorSelection(const Emulator::Program& code,
+    std::span<const std::byte> bytes, std::uint32_t code_rva, std::uint64_t module,
+    std::span<const FunctionRecord> functions, std::uint64_t missing_instance_string,
+    const ValidationObserver& validation) {
+    if (auto value =
+            LegacyOperatorSelection(code, bytes, code_rva, module, functions, missing_instance_string))
+        return value;
+    return BoundedOperatorSelection(code, missing_instance_string, validation);
+}
+
 std::optional<OperatorSelectionDescriptor> DiscoverOperatorSelection(std::span<const std::byte> code,
     std::uint32_t code_rva, std::uint64_t module, std::span<const FunctionRecord> functions,
-    std::span<const std::byte> rdata, std::uint32_t rdata_rva) {
+    std::span<const std::byte> rdata, std::uint32_t rdata_rva, const ValidationObserver& validation) {
     constexpr std::string_view label = "[LoadoutSelectionOperator] The characterInstance contained in the "
                                        "PRI is invalid for wanted operator. How is it possible ?";
     const auto needle = std::as_bytes(std::span(label.data(), label.size() + 1));
     const auto at = std::search(rdata.begin(), rdata.end(), needle.begin(), needle.end());
     if (at == rdata.end() ||
-        std::search(at + needle.size(), rdata.end(), needle.begin(), needle.end()) != rdata.end())
+        std::search(at + needle.size(), rdata.end(), needle.begin(), needle.end()) != rdata.end()) {
+        if (validation)
+            validation("operator_selection_anchor_rejected", module + rdata_rva, rdata.size());
         return std::nullopt;
+    }
     const auto target = module + rdata_rva + (at - rdata.begin());
     std::set<std::uint32_t> consumers;
     for (std::size_t j = 4; j <= code.size(); ++j) {
@@ -2644,7 +3384,7 @@ std::optional<OperatorSelectionDescriptor> DiscoverOperatorSelection(std::span<c
             });
         if (!references)
             continue;
-        auto value = OperatorSelection(*decoded, code, code_rva, module, functions, target);
+        auto value = OperatorSelection(*decoded, code, code_rva, module, functions, target, validation);
         if (!value || result)
             return std::nullopt;
         result = std::move(value);
@@ -2652,12 +3392,19 @@ std::optional<OperatorSelectionDescriptor> DiscoverOperatorSelection(std::span<c
     return result;
 }
 
-std::optional<OwnershipDescriptor> OwnerProfile(const Emulator::Program& wrapper) {
+std::optional<OwnershipDescriptor> OwnerProfile(
+    const Emulator::Program& wrapper, const ValidationObserver& validation) {
     const auto& ins = wrapper.instructions;
+    const auto rejected = [&](std::string_view reason, std::uint64_t value = 0) {
+        if (validation)
+            validation(reason, wrapper.begin, value);
+        return std::nullopt;
+    };
 
     struct Gate {
         std::size_t begin, end;
         std::int64_t table;
+        std::uint64_t failure;
     };
 
     std::vector<Gate> gates;
@@ -2678,16 +3425,22 @@ std::optional<OwnershipDescriptor> OwnerProfile(const Emulator::Program& wrapper
         const auto& b = ins[j + 1];
         const auto& c = ins[j + 2];
         if (a.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
-            a.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
-            a.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY || a.operands[1].mem.disp.value != 0 ||
+            a.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || a.operands[0].size != 64 ||
+            a.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY || a.operands[1].size != 64 ||
+            a.operands[1].mem.index != ZYDIS_REGISTER_NONE || a.operands[1].mem.disp.value != 0 ||
             b.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
-            b.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
-            b.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+            b.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || b.operands[0].size != 64 ||
+            b.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY || b.operands[1].size != 64 ||
+            b.operands[1].mem.index != ZYDIS_REGISTER_NONE ||
             b.operands[1].mem.base != a.operands[0].reg.value || b.operands[1].mem.disp.value < 0 ||
-            b.operands[1].mem.disp.value >= 0x1000 || c.instruction.mnemonic != ZYDIS_MNEMONIC_MOVZX ||
+            b.operands[1].mem.disp.value >= 0x1000 || b.operands[1].mem.disp.value % 8 ||
+            c.instruction.mnemonic != ZYDIS_MNEMONIC_MOVZX ||
             c.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY || c.operands[1].size != 16 ||
+            c.operands[1].mem.index != ZYDIS_REGISTER_NONE ||
             c.operands[1].mem.base != b.operands[0].reg.value || c.operands[1].mem.disp.value != 0x40 ||
             ins[j + 3].instruction.mnemonic != ZYDIS_MNEMONIC_CMP || !rip(ins[j + 3], 1) ||
+            ins[j + 3].operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || ins[j + 3].operands[0].size != 16 ||
+            ins[j + 3].operands[1].size != 16 ||
             Dependency(ins[j + 3].operands[0].reg.value) != Dependency(c.operands[0].reg.value))
             continue;
 
@@ -2701,28 +3454,97 @@ std::optional<OwnershipDescriptor> OwnerProfile(const Emulator::Program& wrapper
             upper = static_cast<std::size_t>(found - ins.begin());
         } else if (ins[j + 4].instruction.mnemonic != ZYDIS_MNEMONIC_JB)
             continue;
-        if (upper <= j + 4 || upper + 2 >= ins.size() ||
+        if (upper <= j + 4 || upper + 3 >= ins.size() ||
             ins[upper].instruction.mnemonic != ZYDIS_MNEMONIC_MOVZX ||
             ins[upper].operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY || ins[upper].operands[1].size != 16 ||
+            ins[upper].operands[1].mem.index != ZYDIS_REGISTER_NONE ||
             ins[upper].operands[1].mem.base != b.operands[0].reg.value ||
             ins[upper].operands[1].mem.disp.value != 0x42 ||
             ins[upper + 1].instruction.mnemonic != ZYDIS_MNEMONIC_CMP ||
+            ins[upper + 1].operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+            ins[upper + 1].operands[0].size != 16 || ins[upper + 1].operands[1].size != 16 ||
             Dependency(ins[upper + 1].operands[0].reg.value) !=
                 Dependency(ins[upper].operands[0].reg.value) ||
             rip(ins[upper + 1], 1) != rip(ins[j + 3], 1) + 2 ||
-            ins[upper + 2].instruction.mnemonic != ZYDIS_MNEMONIC_JNBE)
+            (ins[upper + 2].instruction.mnemonic != ZYDIS_MNEMONIC_JNBE &&
+                ins[upper + 2].instruction.mnemonic != ZYDIS_MNEMONIC_JBE))
             continue;
         const auto failure = ins[j + 4].instruction.mnemonic == ZYDIS_MNEMONIC_JB ? branch_target(ins[j + 4])
                                                                                   : ins[j + 5].address;
-        if (!failure || branch_target(ins[upper + 2]) != failure)
+        const auto upper_failure = ins[upper + 2].instruction.mnemonic == ZYDIS_MNEMONIC_JNBE
+            ? branch_target(ins[upper + 2])
+            : ins[upper + 3].address;
+        if (!failure || upper_failure != failure)
             continue;
-        gates.push_back({j, upper + 2, b.operands[1].mem.disp.value});
+        gates.push_back({j, upper + 2, b.operands[1].mem.disp.value, failure});
     }
     if (gates.size() != 2 || gates[1].begin <= gates[0].end + 2 || gates[0].table != gates[1].table)
-        return std::nullopt;
+        return rejected("owner_profile_type_gates", gates.size());
     const auto first = gates[0].begin, second = gates[1].begin;
     const auto owner_reg = ins[first].operands[1].mem.base;
     const auto profile_reg = ins[second].operands[1].mem.base;
+    std::optional<std::size_t> profile_guard;
+    for (std::size_t j = second; j > gates[0].end + 1 && second - j < 12; --j) {
+        const auto guard = j - 1;
+        if (ins[guard].instruction.mnemonic != ZYDIS_MNEMONIC_JZ ||
+            branch_target(ins[guard]) != gates[1].failure || !guard)
+            continue;
+        const auto& tested = ins[guard - 1];
+        const auto& target = tested.operands[0];
+        if (target.type != ZYDIS_OPERAND_TYPE_REGISTER || target.size != 64 || !Dependency(target.reg.value))
+            continue;
+        const bool self_test = tested.instruction.mnemonic == ZYDIS_MNEMONIC_TEST &&
+            tested.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER && tested.operands[1].size == 64 &&
+            tested.operands[1].reg.value == target.reg.value;
+        if (!self_test && tested.instruction.mnemonic != ZYDIS_MNEMONIC_XOR &&
+            tested.instruction.mnemonic != ZYDIS_MNEMONIC_ADD &&
+            tested.instruction.mnemonic != ZYDIS_MNEMONIC_SUB)
+            continue;
+        std::array<unsigned, 16> identities{};
+        for (unsigned n = 0; n < identities.size(); ++n)
+            identities[n] = n + 1;
+        const auto id = [](ZydisRegister reg) {
+            return ZydisRegisterGetId(ZydisRegisterGetLargestEnclosing(ZYDIS_MACHINE_MODE_LONG_64, reg));
+        };
+        unsigned next_identity = 17, zero_identity{};
+        const auto begin = std::max(gates[0].end + 1, guard > 12 ? guard - 12 : 0);
+        for (std::size_t n = begin; n < second; ++n) {
+            const auto& d = ins[n];
+            const auto before = identities;
+            for (unsigned k = 0; k < d.instruction.operand_count; ++k) {
+                const auto& o = d.operands[k];
+                if (o.type != ZYDIS_OPERAND_TYPE_REGISTER || !Dependency(o.reg.value) ||
+                    !(o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE))
+                    continue;
+                auto identity = next_identity++;
+                if (k == 0 && o.size == 64 &&
+                    (d.instruction.mnemonic == ZYDIS_MNEMONIC_ROL ||
+                        d.instruction.mnemonic == ZYDIS_MNEMONIC_ROR))
+                    identity = before[id(o.reg.value)];
+                if (k == 0 && o.size == 64 && d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                    d.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER && d.operands[1].size == 64 &&
+                    Dependency(d.operands[1].reg.value))
+                    identity = before[id(d.operands[1].reg.value)];
+                identities[id(o.reg.value)] = identity;
+            }
+            if (n == guard - 1)
+                zero_identity = identities[id(target.reg.value)];
+        }
+        if (zero_identity && identities[id(profile_reg)] == zero_identity) {
+            if (profile_guard)
+                return std::nullopt;
+            profile_guard = guard;
+        }
+    }
+    if (!profile_guard)
+        return rejected("owner_profile_null_guard");
+    for (std::size_t j = gates[0].end + 1; j < second; ++j) {
+        const auto category = ins[j].instruction.meta.category;
+        if (category == ZYDIS_CATEGORY_CALL || category == ZYDIS_CATEGORY_RET ||
+            category == ZYDIS_CATEGORY_UNCOND_BR ||
+            (category == ZYDIS_CATEGORY_COND_BR && j != *profile_guard))
+            return rejected("owner_profile_control_flow", ins[j].address);
+    }
     std::optional<std::size_t> mix;
     for (std::size_t j = 0; j + 1 < first; ++j) {
         const auto& d = ins[j];
@@ -2739,10 +3561,40 @@ std::optional<OwnershipDescriptor> OwnerProfile(const Emulator::Program& wrapper
             mix = j;
         }
     }
-    if (!mix || ins[second - 1].instruction.mnemonic != ZYDIS_MNEMONIC_JZ)
-        return std::nullopt;
+    if (!mix)
+        return rejected("owner_profile_owner_mix");
 
     auto owner = Slice(Simplify(wrapper), *mix, owner_reg);
+    if (!owner || owner->inputs != Dependency(ZYDIS_REGISTER_RDX)) {
+        for (std::size_t j = 0; j < *mix; ++j) {
+            const auto category = ins[j].instruction.meta.category;
+            if (category == ZYDIS_CATEGORY_CALL || category == ZYDIS_CATEGORY_RET ||
+                category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR)
+                return rejected("owner_profile_caller_control_flow", ins[j].address);
+        }
+        const auto caller = CallerSlot(wrapper, *mix);
+        if (!caller || *caller < 8)
+            return rejected("owner_profile_caller_frame");
+        auto normalized = wrapper;
+        unsigned replacements{};
+        for (std::size_t j = 0; j < *mix; ++j) {
+            auto& d = normalized.instructions[j];
+            if (d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+                d.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || d.operands[0].size != 64 ||
+                !LocalSlot(d.operands[1]) || d.operands[1].size != 64 ||
+                d.operands[1].mem.segment != ZYDIS_REGISTER_SS || d.operands[1].mem.disp.value != *caller ||
+                CallerSlot(wrapper, j) != caller)
+                continue;
+            d.operands[1].type = ZYDIS_OPERAND_TYPE_IMMEDIATE;
+            d.operands[1].imm.is_signed = false;
+            d.operands[1].imm.is_relative = false;
+            d.operands[1].imm.value.u = wrapper.begin;
+            ++replacements;
+        }
+        if (replacements != 1)
+            return rejected("owner_profile_caller_input", replacements);
+        owner = Slice(Simplify(normalized, true), first, owner_reg);
+    }
     Emulator::Program profile_code{};
     profile_code.linear = true;
 
@@ -2754,16 +3606,45 @@ std::optional<OwnershipDescriptor> OwnerProfile(const Emulator::Program& wrapper
             profile_code.instructions.insert(profile_code.instructions.end(),
                 value->code.instructions.begin(), value->code.instructions.end());
     }
+    const auto profile_end = ins[second - 1].instruction.mnemonic == ZYDIS_MNEMONIC_JZ ? second - 1 : second;
     profile_code.instructions.insert(
-        profile_code.instructions.end(), ins.begin() + gates[0].end + 1, ins.begin() + second - 1);
+        profile_code.instructions.end(), ins.begin() + gates[0].end + 1, ins.begin() + profile_end);
     if (profile_code.instructions.empty())
         return std::nullopt;
     profile_code.begin = profile_code.instructions.front().address;
-    profile_code.end = ins[second - 1].address;
+    profile_code.end = ins[profile_end].address;
     auto profile = Slice(Simplify(profile_code), profile_code.instructions.size(), profile_reg);
+    if (!profile || profile->inputs != Dependency(owner_reg))
+        profile = Slice(Simplify(profile_code, true), profile_code.instructions.size(), profile_reg);
+    if (!profile || profile->inputs != Dependency(owner_reg)) {
+        Emulator::Program expanded{};
+        expanded.linear = true;
+        for (unsigned j = 0; j < 16; ++j) {
+            const auto reg = static_cast<ZydisRegister>(ZYDIS_REGISTER_RAX + j);
+            if (reg == ZYDIS_REGISTER_RSP || reg == owner_reg)
+                continue;
+            const auto value = Slice(Simplify(wrapper, true), first, reg);
+            if (value && !value->inputs)
+                expanded.instructions.insert(expanded.instructions.end(), value->code.instructions.begin(),
+                    value->code.instructions.end());
+        }
+        expanded.instructions.insert(
+            expanded.instructions.end(), ins.begin() + first, ins.begin() + gates[0].end + 1);
+        expanded.instructions.insert(
+            expanded.instructions.end(), profile_code.instructions.begin(), profile_code.instructions.end());
+        expanded.begin = expanded.instructions.front().address;
+        expanded.end = profile_code.end;
+        profile = Slice(Simplify(expanded, true), expanded.instructions.size(), profile_reg);
+    }
     if (!owner || !profile || owner->inputs != Dependency(ZYDIS_REGISTER_RDX) ||
         profile->inputs != Dependency(owner_reg))
-        return std::nullopt;
+        return rejected("owner_profile_inputs",
+            !owner         ? 0
+                : !profile ? 1
+                           : (static_cast<std::uint64_t>(owner->inputs) << 32) | profile->inputs);
+
+    if (validation)
+        validation("owner_profile_accepted", wrapper.begin, 1);
 
     return OwnershipDescriptor{
         std::move(*owner), std::move(*profile), rip(ins[first + 3], 1), rip(ins[second + 3], 1)};
@@ -2771,16 +3652,43 @@ std::optional<OwnershipDescriptor> OwnerProfile(const Emulator::Program& wrapper
 
 static std::optional<UsernameDescriptor> Username(const Emulator::Program& wrapper,
     std::span<const std::byte> bytes, std::uint32_t code_rva, std::uint64_t module,
-    std::span<const FunctionRecord> functions) {
+    std::span<const FunctionRecord> functions, const ValidationObserver& validation = {}) {
 
-    const auto paths = OwnerProfile(wrapper);
+    const auto paths = OwnerProfile(wrapper, validation);
     if (!paths)
         return std::nullopt;
     const auto& ins = wrapper.instructions;
     std::optional<std::uint32_t> field;
+    std::optional<std::size_t> profile_success;
+    for (std::size_t j = 0; j + 1 < ins.size(); ++j) {
+        const auto& d = ins[j];
+        if (d.instruction.mnemonic != ZYDIS_MNEMONIC_CMP || d.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+            d.operands[1].mem.base != ZYDIS_REGISTER_RIP ||
+            d.address + d.instruction.length + d.operands[1].mem.disp.value != paths->profile_type + 2)
+            continue;
+        const auto& branch = ins[j + 1];
+        if (branch.instruction.mnemonic == ZYDIS_MNEMONIC_JNBE)
+            profile_success = j + 2;
+        else if (branch.instruction.mnemonic == ZYDIS_MNEMONIC_JBE &&
+            branch.operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && branch.operands[0].imm.is_relative) {
+            const auto target = branch.address + branch.instruction.length + branch.operands[0].imm.value.s;
+            const auto at = std::lower_bound(ins.begin(), ins.end(), target,
+                [](const auto& d, auto address) { return d.address < address; });
+            if (at != ins.end() && at->address == target)
+                profile_success = static_cast<std::size_t>(at - ins.begin());
+        }
+    }
+    if (!profile_success || *profile_success >= ins.size())
+        return std::nullopt;
     for (const auto& call : ins) {
         if (call.instruction.mnemonic != ZYDIS_MNEMONIC_CALL ||
             call.operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || !call.operands[0].imm.is_relative)
+            continue;
+        const auto call_index = static_cast<std::size_t>(&call - ins.data());
+        const bool direct = call_index == *profile_success && paths->profile.output == ZYDIS_REGISTER_RDX;
+        if (!direct &&
+            !Flow(wrapper, *profile_success, call_index, Location{paths->profile.output, 0, false},
+                Location{ZYDIS_REGISTER_RDX, 0, false}))
             continue;
         const auto target = call.address + call.instruction.length + call.operands[0].imm.value.s;
         const auto found = std::lower_bound(functions.begin(), functions.end(), target - module,
@@ -2820,8 +3728,13 @@ static std::optional<UsernameDescriptor> Username(const Emulator::Program& wrapp
             }
         }
     }
-    if (!field)
+    if (!field) {
+        if (validation)
+            validation("username_string_consumer", wrapper.begin, 0);
         return std::nullopt;
+    }
+    if (validation)
+        validation("username_accepted", wrapper.begin, *field);
     return UsernameDescriptor{paths->owner, paths->profile, paths->owner_type, paths->profile_type, *field};
 }
 
@@ -2902,37 +3815,134 @@ static std::optional<std::pair<ZydisRegister, ZydisRegister>> HealthArguments(
 
 static std::optional<HealthDescriptor> Health(const Emulator::Program& source,
     std::span<const std::byte> image, std::uint32_t code_rva, std::uint64_t module,
-    std::span<const FunctionRecord> functions) {
+    std::span<const FunctionRecord> functions, const ValidationObserver& validation = {}) {
     const auto& instructions = source.instructions;
     const auto count = [&](ZydisMnemonic m) {
         return std::count_if(instructions.begin(), instructions.end(),
             [&](const auto& d) { return d.instruction.mnemonic == m; });
     };
 
-    if (count(ZYDIS_MNEMONIC_CVTTSS2SI) < 2 || count(ZYDIS_MNEMONIC_MOVD) < 1)
+    if (count(ZYDIS_MNEMONIC_CVTTSS2SI) < 2 || count(ZYDIS_MNEMONIC_MOVD) < 1) {
+        if (validation)
+            validation("health_scalar_conversions", source.begin, count(ZYDIS_MNEMONIC_CVTTSS2SI));
         return std::nullopt;
+    }
+    const auto tested = [&](std::size_t before, ZydisRegister reg) {
+        for (unsigned remaining = 4; before && remaining; --remaining) {
+            const auto& d = instructions[--before];
+            if (d.instruction.mnemonic == ZYDIS_MNEMONIC_TEST)
+                return d.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                    d.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER && d.operands[0].size == 32 &&
+                    d.operands[1].size == 32 && d.operands[0].reg.value == reg &&
+                    d.operands[1].reg.value == reg;
+            if ((d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV &&
+                    d.instruction.mnemonic != ZYDIS_MNEMONIC_LEA) ||
+                d.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                Dependency(d.operands[0].reg.value) == Dependency(reg))
+                return false;
+        }
+        return false;
+    };
+    std::vector<std::optional<std::uint32_t>> zero_states(instructions.size());
+    if (!instructions.empty())
+        zero_states.front() = 0;
+    std::vector<std::size_t> zero_pending{0};
+    unsigned zero_steps{};
+    while (!zero_pending.empty() && zero_steps++ < 16384) {
+        const auto at = zero_pending.back();
+        zero_pending.pop_back();
+        if (at >= instructions.size())
+            continue;
+        const auto& d = instructions[at];
+        const auto before = *zero_states[at];
+        auto after = before;
+        for (unsigned j = 0; j < d.instruction.operand_count; ++j) {
+            const auto& o = d.operands[j];
+            if (o.type != ZYDIS_OPERAND_TYPE_REGISTER || !Dependency(o.reg.value) ||
+                !(o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE))
+                continue;
+            const auto bit = Dependency(o.reg.value);
+            const auto& value = d.operands[1];
+            bool zero{};
+            if (j == 0 && o.size >= 32) {
+                zero = (d.instruction.mnemonic == ZYDIS_MNEMONIC_XOR ||
+                           d.instruction.mnemonic == ZYDIS_MNEMONIC_SUB) &&
+                    value.type == ZYDIS_OPERAND_TYPE_REGISTER && value.reg.value == o.reg.value;
+                if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV)
+                    zero = (value.type == ZYDIS_OPERAND_TYPE_IMMEDIATE && !value.imm.is_relative &&
+                               !value.imm.value.u) ||
+                        (value.type == ZYDIS_OPERAND_TYPE_REGISTER && value.size >= 32 &&
+                            (before & Dependency(value.reg.value)));
+                if (o.actions & ZYDIS_OPERAND_ACTION_CONDWRITE)
+                    zero = (before & bit) && value.type == ZYDIS_OPERAND_TYPE_REGISTER && value.size >= 32 &&
+                        (before & Dependency(value.reg.value));
+            }
+            after = zero ? after | bit : after & ~bit;
+        }
+        if (d.instruction.meta.category == ZYDIS_CATEGORY_CALL)
+            after &= ~0xf07u;
+        const auto append = [&](std::size_t target) {
+            if (target >= zero_states.size())
+                return;
+            const auto merged = zero_states[target] ? *zero_states[target] & after : after;
+            if (!zero_states[target] || *zero_states[target] != merged) {
+                zero_states[target] = merged;
+                zero_pending.push_back(target);
+            }
+        };
+        const auto category = d.instruction.meta.category;
+        if (category != ZYDIS_CATEGORY_RET && category != ZYDIS_CATEGORY_UNCOND_BR)
+            append(at + 1);
+        if ((category == ZYDIS_CATEGORY_COND_BR || category == ZYDIS_CATEGORY_UNCOND_BR) &&
+            d.operands[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE && d.operands[0].imm.is_relative) {
+            const auto target = d.address + d.instruction.length + d.operands[0].imm.value.s;
+            const auto found = std::lower_bound(instructions.begin(), instructions.end(), target,
+                [](const auto& instruction, auto address) { return instruction.address < address; });
+            if (found != instructions.end() && found->address == target)
+                append(static_cast<std::size_t>(found - instructions.begin()));
+        }
+    }
+    if (zero_steps >= 16384) {
+        if (validation)
+            validation("health_zero_provenance_limit", source.begin, zero_steps);
+        return std::nullopt;
+    }
     std::optional<HealthDescriptor> result;
     for (std::size_t j = 1; j + 4 < instructions.size(); ++j) {
         const auto& first = instructions[j];
         if (first.instruction.mnemonic != ZYDIS_MNEMONIC_CMOVLE ||
             first.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || first.operands[0].size != 32 ||
-            instructions[j - 1].instruction.mnemonic != ZYDIS_MNEMONIC_TEST)
+            first.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER || first.operands[1].size != 32 ||
+            !tested(j, first.operands[0].reg.value))
             continue;
         for (std::size_t k = j + 2; k <= j + 4; ++k) {
             const auto& second = instructions[k];
             const auto& following = instructions[k + 1];
             if (second.instruction.mnemonic != ZYDIS_MNEMONIC_CMOVNLE ||
                 second.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || second.operands[0].size != 32 ||
-                instructions[k - 1].instruction.mnemonic != ZYDIS_MNEMONIC_TEST ||
-                following.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
-                following.operands[0].reg.value != ZYDIS_REGISTER_RCX || !LocalSlot(following.operands[1]))
+                second.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER || second.operands[1].size != 32 ||
+                second.operands[0].reg.value != first.operands[1].reg.value ||
+                !tested(k, second.operands[1].reg.value))
                 continue;
+            if (!zero_states[j] || !zero_states[k] ||
+                !(*zero_states[j] & Dependency(first.operands[1].reg.value)) ||
+                !(*zero_states[k] & Dependency(second.operands[0].reg.value))) {
+                if (validation)
+                    validation("health_zero_provenance", first.address, 0);
+                continue;
+            }
             const auto arguments =
                 HealthArguments(source, k + 1, first.operands[0].reg.value, second.operands[0].reg.value);
-            if (!arguments)
+            if (!arguments) {
+                if (validation)
+                    validation("health_argument_provenance", first.address, 0);
                 continue;
-            if (result)
+            }
+            if (result) {
+                if (validation)
+                    validation("health_clamp_ambiguity", first.address, 0);
                 return std::nullopt;
+            }
             auto program = source;
             program.end = following.address;
 
@@ -3021,6 +4031,8 @@ static std::optional<HealthDescriptor> Health(const Emulator::Program& source,
             result = HealthDescriptor{std::move(program), arguments->second, arguments->first};
         }
     }
+    if (validation)
+        validation(result ? "health_accepted" : "health_clamp_provenance", source.begin, result ? 1 : 0);
     return result;
 }
 
@@ -3145,12 +4157,20 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
             continue;
         const auto bytes = code.subspan(f.begin - code_rva, f.end - f.begin);
         const auto prefix = bytes.first(std::min<std::size_t>(bytes.size(), 0x200));
-        if (bytes.size() < 0x1000 && contains(prefix.first(std::min<std::size_t>(prefix.size(), 96)), 0x1c))
-            if (auto decoded = Emulator::Decode(bytes, module + f.begin, true))
-                if (auto value = equipment::DefuserOwner(*decoded)) {
+        if (bytes.size() < 0x1000 && contains(prefix.first(std::min<std::size_t>(prefix.size(), 96)), 0x1c)) {
+            if (checkpoint)
+                checkpoint("defuser", index, f);
+            auto decoded = Emulator::Decode(bytes, module + f.begin, true);
+            unsigned accepted{};
+            if (decoded)
+                if (auto value = equipment::DefuserOwner(*decoded, validation)) {
                     ++defuser_candidates;
+                    accepted = 1;
                     result.defuser = std::move(value);
                 }
+            if (observer)
+                observer("defuser", f, bytes, decoded ? &*decoded : nullptr, accepted);
+        }
         bool object = false, gs = false, zero = false;
         for (std::size_t j = 0; j + 3 <= prefix.size(); ++j) {
             const auto a = std::to_integer<unsigned>(prefix[j]), b = std::to_integer<unsigned>(prefix[j + 1]),
@@ -3172,7 +4192,7 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
             const auto before = result.health.size();
             auto decoded = Emulator::Decode(bytes, module + f.begin, true);
             if (decoded)
-                if (auto value = Health(*decoded, code, code_rva, module, functions))
+                if (auto value = Health(*decoded, code, code_rva, module, functions, validation))
                     result.health.push_back(std::move(*value));
             if (observer)
                 observer("health", f, bytes, decoded ? &*decoded : nullptr, result.health.size() - before);
@@ -3200,12 +4220,28 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                 casts += bytes[j] == std::byte{0x0f} && bytes[j + 1] == std::byte{0xb7};
         if ((gs && bytes.size() < 0x500) || (casts >= 4 && bytes.size() < 0x1000))
             if (auto decoded = Emulator::Decode(bytes, module + f.begin, true)) {
-                if (auto value = OwnerProfile(*decoded))
+                if (checkpoint)
+                    checkpoint("owner profile", index, f);
+                const auto owners = result.ownership.size();
+                if (auto value = OwnerProfile(*decoded, validation))
                     result.ownership.push_back(std::move(*value));
-                if (auto value = Username(*decoded, code, code_rva, module, functions))
+                if (observer)
+                    observer("owner profile", f, bytes, &*decoded, result.ownership.size() - owners);
+                if (checkpoint)
+                    checkpoint("name", index, f);
+                const auto names = result.usernames.size();
+                if (auto value = Username(*decoded, code, code_rva, module, functions, validation))
                     result.usernames.push_back(std::move(*value));
+                if (observer)
+                    observer("name", f, bytes, &*decoded, result.usernames.size() - names);
+                if (checkpoint)
+                    checkpoint("operator common asset", index, f);
+                const auto operators = result.operator_names.size();
                 if (auto value = OperatorName(*decoded))
                     result.operator_names.push_back(std::move(*value));
+                if (observer)
+                    observer("operator common asset", f, bytes, &*decoded,
+                        result.operator_names.size() - operators);
             }
         bool array_anchor = false;
         if (bytes.size() > 32 && bytes.size() < 0x10000)
@@ -3278,6 +4314,7 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
             if (decoded && root_anchor)
                 if (auto value = Root(*decoded, validation)) {
                     std::optional<Expression> context;
+                    std::optional<std::uint64_t> context_target;
                     const auto& instructions = decoded->instructions;
                     for (std::size_t j = 0; j + 5 < instructions.size(); ++j) {
                         const auto& call = instructions[j];
@@ -3327,7 +4364,6 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                         if (alternate_index + 2 >= instructions.size())
                             continue;
                         const auto& alternate = instructions[alternate_index];
-                        const auto& output = instructions[alternate_index + 1];
                         if (call.instruction.mnemonic != ZYDIS_MNEMONIC_CALL ||
                             call.operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
                             !call.operands[0].imm.is_relative ||
@@ -3338,12 +4374,128 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                             test.operands[1].reg.value != ZYDIS_REGISTER_AL ||
                             (branch.instruction.mnemonic != ZYDIS_MNEMONIC_JZ &&
                                 branch.instruction.mnemonic != ZYDIS_MNEMONIC_JNZ) ||
-                            alternate.instruction.mnemonic != ZYDIS_MNEMONIC_CALL ||
-                            output.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
-                            output.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER ||
-                            output.operands[1].reg.value != ZYDIS_REGISTER_RAX ||
-                            instructions[alternate_index + 2].instruction.mnemonic != ZYDIS_MNEMONIC_JMP)
+                            alternate.instruction.mnemonic != ZYDIS_MNEMONIC_CALL)
                             continue;
+                        const auto destination = [&](const auto& jump) -> std::optional<std::size_t> {
+                            if (jump.operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+                                !jump.operands[0].imm.is_relative)
+                                return std::nullopt;
+                            const auto address =
+                                jump.address + jump.instruction.length + jump.operands[0].imm.value.s;
+                            const auto found = std::lower_bound(instructions.begin(), instructions.end(),
+                                address, [](const auto& item, auto at) { return item.address < at; });
+                            if (found == instructions.end() || found->address != address)
+                                return std::nullopt;
+                            return static_cast<std::size_t>(found - instructions.begin());
+                        };
+                        auto output_index = alternate_index + 1;
+                        const bool shared =
+                            instructions[output_index].instruction.mnemonic == ZYDIS_MNEMONIC_JMP;
+                        if (shared) {
+                            const auto joined = destination(instructions[output_index]);
+                            if (!joined)
+                                continue;
+                            output_index = *joined;
+                        }
+                        const auto& output = instructions[output_index];
+                        if (output.instruction.mnemonic != ZYDIS_MNEMONIC_MOV ||
+                            output.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                            output.operands[1].reg.value != ZYDIS_REGISTER_RAX)
+                            continue;
+                        if (shared) {
+                            const auto frame = CallerSlot(*decoded, output_index);
+                            if (!LocalSlot(output.operands[0]) || output.operands[0].size != 64 ||
+                                output.operands[1].size != 64 || output.operands[0].mem.disp.value < 0 ||
+                                !frame || output.operands[0].mem.disp.value + 8 > *frame)
+                                continue;
+                        } else if (instructions[alternate_index + 2].instruction.mnemonic !=
+                            ZYDIS_MNEMONIC_JMP) {
+                            const auto join = alternate_index + 2;
+                            if (output.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                                output.operands[0].size != 64 || output.operands[1].size != 64 ||
+                                !Dependency(output.operands[0].reg.value) ||
+                                (Dependency(output.operands[0].reg.value) &
+                                    (Dependency(ZYDIS_REGISTER_RAX) | Dependency(ZYDIS_REGISTER_RSP))) ||
+                                instructions[join].instruction.mnemonic != ZYDIS_MNEMONIC_CALL ||
+                                instructions[join].operands[0].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+                                !instructions[join].operands[0].imm.is_relative ||
+                                join + 2 >= instructions.size() ||
+                                instructions[join + 1].instruction.mnemonic != ZYDIS_MNEMONIC_TEST ||
+                                instructions[join + 1].operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                                instructions[join + 1].operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                                instructions[join + 1].operands[0].reg.value != ZYDIS_REGISTER_AL ||
+                                instructions[join + 1].operands[1].reg.value != ZYDIS_REGISTER_AL ||
+                                (instructions[join + 2].instruction.mnemonic != ZYDIS_MNEMONIC_JZ &&
+                                    instructions[join + 2].instruction.mnemonic != ZYDIS_MNEMONIC_JNZ) ||
+                                !destination(instructions[join + 2]))
+                                continue;
+                            const auto common_target = instructions[join].address +
+                                instructions[join].instruction.length +
+                                instructions[join].operands[0].imm.value.s;
+                            if (common_target < module + code_rva ||
+                                common_target - module - code_rva >= code.size())
+                                continue;
+                            const auto zero_path = branch.instruction.mnemonic == ZYDIS_MNEMONIC_JZ
+                                ? destination(branch)
+                                : std::optional<std::size_t>(branch_index + 1);
+                            if (!zero_path)
+                                continue;
+                            const auto wanted = Dependency(output.operands[0].reg.value);
+                            std::vector<unsigned char> states(instructions.size() * 2);
+                            bool jumped = false;
+                            unsigned visited = 0;
+                            const auto reaches = [&](auto&& self, std::size_t at, bool defined) -> bool {
+                                if (at == join)
+                                    return defined;
+                                if (at >= instructions.size())
+                                    return false;
+                                auto& state = states[at * 2 + defined];
+                                if (state)
+                                    return state == 2;
+                                if (++visited > 512)
+                                    return false;
+                                state = 1;
+                                const auto& d = instructions[at];
+                                bool valid = d.instruction.meta.category != ZYDIS_CATEGORY_CALL &&
+                                    d.instruction.meta.category != ZYDIS_CATEGORY_RET;
+                                for (unsigned k = 0; k < d.instruction.operand_count; ++k) {
+                                    const auto& operand = d.operands[k];
+                                    if (!(operand.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE))
+                                        continue;
+                                    if (operand.type == ZYDIS_OPERAND_TYPE_MEMORY)
+                                        valid &= LocalSlot(operand);
+                                    if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER)
+                                        valid &=
+                                            !(Dependency(operand.reg.value) & Dependency(ZYDIS_REGISTER_RSP));
+                                    if (operand.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                                        (Dependency(operand.reg.value) & wanted)) {
+                                        const bool moved = d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                                            d.operands[0].size == 64;
+                                        const bool cleared = d.instruction.mnemonic == ZYDIS_MNEMONIC_XOR &&
+                                            (d.operands[0].size == 32 || d.operands[0].size == 64) &&
+                                            d.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                                            d.operands[0].reg.value == d.operands[1].reg.value;
+                                        valid &= moved || cleared;
+                                        defined = true;
+                                    }
+                                }
+                                const auto category = d.instruction.meta.category;
+                                if (valid &&
+                                    (category == ZYDIS_CATEGORY_COND_BR ||
+                                        category == ZYDIS_CATEGORY_UNCOND_BR)) {
+                                    const auto target = destination(d);
+                                    if (target && *target == join)
+                                        jumped = true;
+                                    valid = target && self(self, *target, defined);
+                                }
+                                if (valid && category != ZYDIS_CATEGORY_UNCOND_BR)
+                                    valid = self(self, at + 1, defined);
+                                state = valid ? 2 : 3;
+                                return valid;
+                            };
+                            if (!reaches(reaches, *zero_path, false) || !jumped)
+                                continue;
+                        }
                         const auto target =
                             call.address + call.instruction.length + call.operands[0].imm.value.s;
                         if (target < module || target - module > 0xffffffffu)
@@ -3399,14 +4551,19 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
                                 candidate = Slice(*leaf, k, ZYDIS_REGISTER_EAX);
                                 if (candidate && candidate->inputs)
                                     candidate = Slice(Simplify(*leaf), k, ZYDIS_REGISTER_EAX);
+                                if (candidate && candidate->inputs)
+                                    candidate = Slice(Simplify(*leaf, true), k, ZYDIS_REGISTER_EAX);
                             }
                         }
                         if (valid && candidate && !candidate->inputs) {
                             if (context) {
+                                if (context_target == target)
+                                    continue;
                                 context.reset();
                                 break;
                             }
                             context = std::move(candidate);
+                            context_target = target;
                         }
                     }
                     if (context) {
@@ -3569,8 +4726,13 @@ NativeDescriptor Discover(std::span<const std::byte> code, std::uint32_t code_rv
         }
     if (local_profile_fields.size() == 1)
         result.local_profile_field = *local_profile_fields.begin();
-    if (defuser_candidates != 1)
+    if (defuser_candidates != 1) {
         result.defuser.reset();
+        if (checkpoint)
+            checkpoint("defuser", functions.size(), {});
+        if (validation)
+            validation("defuser native candidate count rejected", module, defuser_candidates);
+    }
     if (progress)
         progress(functions.size(), functions.size());
     return result;
@@ -3653,254 +4815,315 @@ std::vector<PoseDescriptor> Poses(const Emulator::Program& code, const Validatio
             ? static_cast<std::size_t>(found - instructions.begin())
             : instructions.size();
     };
-    for (std::size_t pair = 1; pair + 1 < instructions.size(); ++pair) {
-        const auto& a = instructions[pair];
-        const auto& b = instructions[pair + 1];
-        const auto& shift = instructions[pair - 1];
-        const auto vector_load = [](const Emulator::Decoded& d) {
-            return d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVAPS ||
-                d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVUPS ||
-                d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVDQA ||
-                d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVDQU;
-        };
-        if (vector_load(a) && vector_load(b) && a.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY &&
-            b.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY)
-            failed(1, "pose vector index or 0x20 stride not proven", a.address,
-                shift.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE ? shift.operands[1].imm.value.u : 0);
-        if (!vector_load(a) || !vector_load(b) || a.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
-            b.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
-            a.operands[1].mem.base != b.operands[1].mem.base ||
-            a.operands[1].mem.index != b.operands[1].mem.index ||
-            a.operands[1].mem.base == ZYDIS_REGISTER_RSP || !Dependency(a.operands[1].mem.base) ||
-            !Dependency(a.operands[1].mem.index) ||
-            b.operands[1].mem.disp.value != a.operands[1].mem.disp.value + 16 ||
-            shift.instruction.mnemonic != ZYDIS_MNEMONIC_SHL ||
-            shift.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
-            shift.operands[0].reg.value != a.operands[1].mem.index ||
-            shift.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || shift.operands[1].imm.value.u != 5)
-            continue;
-        std::size_t flag = pair;
-        ZydisRegister asset = ZYDIS_REGISTER_NONE;
-        for (std::size_t j = pair; j > 0 && a.address - instructions[j - 1].address < 0x800; --j) {
-            const auto& d = instructions[j - 1];
-            const auto& o = d.operands[d.instruction.mnemonic == ZYDIS_MNEMONIC_TEST ? 0 : 1];
-            if ((d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV &&
-                    d.instruction.mnemonic != ZYDIS_MNEMONIC_MOVZX &&
-                    d.instruction.mnemonic != ZYDIS_MNEMONIC_TEST &&
-                    d.instruction.mnemonic != ZYDIS_MNEMONIC_ADD) ||
-                o.type != ZYDIS_OPERAND_TYPE_MEMORY || (o.size != 8 && o.size != 32) ||
-                o.mem.index != ZYDIS_REGISTER_NONE || o.mem.disp.value <= 0 || !Dependency(o.mem.base) ||
-                o.mem.base == ZYDIS_REGISTER_RSP)
+    for (unsigned proof = 0; proof < 2 && result.empty(); ++proof) {
+        for (std::size_t pair = 1; pair + 1 < instructions.size(); ++pair) {
+            const auto& a = instructions[pair];
+            const auto& b = instructions[pair + 1];
+            const auto& shift = instructions[pair - 1];
+            const auto vector_load = [](const Emulator::Decoded& d) {
+                return d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVAPS ||
+                    d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVUPS ||
+                    d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVDQA ||
+                    d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVDQU;
+            };
+            if (vector_load(a) && vector_load(b) && a.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+                b.operands[1].type == ZYDIS_OPERAND_TYPE_MEMORY)
+                failed(1, "pose vector index or 0x20 stride not proven", a.address,
+                    shift.operands[1].type == ZYDIS_OPERAND_TYPE_IMMEDIATE ? shift.operands[1].imm.value.u
+                                                                           : 0);
+            if (!vector_load(a) || !vector_load(b) || a.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY ||
+                b.operands[1].type != ZYDIS_OPERAND_TYPE_MEMORY || a.instruction.operand_count_visible != 2 ||
+                b.instruction.operand_count_visible != 2 || a.instruction.address_width != 64 ||
+                b.instruction.address_width != 64 || a.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                b.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || a.operands[0].size != 128 ||
+                b.operands[0].size != 128 || a.operands[1].size != 128 || b.operands[1].size != 128 ||
+                ZydisRegisterGetClass(a.operands[0].reg.value) != ZYDIS_REGCLASS_XMM ||
+                ZydisRegisterGetClass(b.operands[0].reg.value) != ZYDIS_REGCLASS_XMM ||
+                a.operands[1].mem.segment == ZYDIS_REGISTER_FS ||
+                a.operands[1].mem.segment == ZYDIS_REGISTER_GS ||
+                b.operands[1].mem.segment == ZYDIS_REGISTER_FS ||
+                b.operands[1].mem.segment == ZYDIS_REGISTER_GS ||
+                a.operands[1].mem.base != b.operands[1].mem.base ||
+                a.operands[1].mem.index != b.operands[1].mem.index ||
+                ZydisRegisterGetClass(a.operands[1].mem.base) != ZYDIS_REGCLASS_GPR64 ||
+                ZydisRegisterGetClass(a.operands[1].mem.index) != ZYDIS_REGCLASS_GPR64 ||
+                a.operands[1].mem.base == ZYDIS_REGISTER_RSP || !Dependency(a.operands[1].mem.base) ||
+                !Dependency(a.operands[1].mem.index) || a.operands[1].mem.scale != 1 ||
+                b.operands[1].mem.scale != 1 || a.operands[1].mem.disp.value != 0 ||
+                b.operands[1].mem.disp.value != 16 || shift.instruction.mnemonic != ZYDIS_MNEMONIC_SHL ||
+                shift.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER || shift.operands[0].size != 64 ||
+                shift.operands[0].reg.value != a.operands[1].mem.index ||
+                shift.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || shift.operands[1].imm.value.u != 5)
                 continue;
-            flag = j - 1;
-            asset = o.mem.base;
-            break;
-        }
-        if (flag == pair) {
-            failed(2, "pose owning asset flag not found", a.address);
-            continue;
-        }
-        if (instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_ADD) {
-            const auto member = instructions[flag].operands[1];
-            for (std::size_t j = flag; j > 0 && a.address - instructions[j - 1].address < 0x800; --j) {
+            std::size_t flag = pair;
+            ZydisRegister asset = ZYDIS_REGISTER_NONE;
+            for (std::size_t j = pair; j > 0 && a.address - instructions[j - 1].address < 0x800; --j) {
                 const auto& d = instructions[j - 1];
-                bool writes =
-                    d.instruction.meta.category == ZYDIS_CATEGORY_CALL && (Dependency(asset) & 0xf07u);
+                const auto& o = d.operands[d.instruction.mnemonic == ZYDIS_MNEMONIC_TEST ? 0 : 1];
+                if ((d.instruction.mnemonic != ZYDIS_MNEMONIC_MOV &&
+                        d.instruction.mnemonic != ZYDIS_MNEMONIC_MOVZX &&
+                        d.instruction.mnemonic != ZYDIS_MNEMONIC_TEST &&
+                        d.instruction.mnemonic != ZYDIS_MNEMONIC_ADD &&
+                        (!proof || d.instruction.mnemonic != ZYDIS_MNEMONIC_XOR)) ||
+                    o.type != ZYDIS_OPERAND_TYPE_MEMORY || (o.size != 8 && o.size != 32) ||
+                    o.mem.index != ZYDIS_REGISTER_NONE || o.mem.disp.value <= 0 || !Dependency(o.mem.base) ||
+                    o.mem.base == ZYDIS_REGISTER_RSP)
+                    continue;
+                flag = j - 1;
+                asset = o.mem.base;
+                break;
+            }
+            if (flag == pair) {
+                failed(2, "pose owning asset flag not found", a.address);
+                continue;
+            }
+            if (instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_ADD || proof) {
+                const auto member =
+                    instructions[flag]
+                        .operands[instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_TEST ? 0 : 1];
+                for (std::size_t j = flag; j > 0 && a.address - instructions[j - 1].address < 0x800; --j) {
+                    const auto& d = instructions[j - 1];
+                    bool writes =
+                        d.instruction.meta.category == ZYDIS_CATEGORY_CALL && (Dependency(asset) & 0xf07u);
+                    for (unsigned k = 0; k < d.instruction.operand_count; ++k) {
+                        const auto& o = d.operands[k];
+                        writes |= o.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                            (o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+                            (Dependency(o.reg.value) & Dependency(asset));
+                    }
+                    if (writes)
+                        break;
+                    const auto& o = d.operands[d.instruction.mnemonic == ZYDIS_MNEMONIC_TEST ? 0 : 1];
+                    const bool member_read = d.instruction.mnemonic == ZYDIS_MNEMONIC_ADD ||
+                        (proof &&
+                            (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV ||
+                                d.instruction.mnemonic == ZYDIS_MNEMONIC_MOVZX ||
+                                d.instruction.mnemonic == ZYDIS_MNEMONIC_TEST ||
+                                d.instruction.mnemonic == ZYDIS_MNEMONIC_XOR));
+                    if (member_read && o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.size == member.size &&
+                        o.mem.base == member.mem.base && o.mem.index == ZYDIS_REGISTER_NONE &&
+                        o.mem.disp.value == member.mem.disp.value)
+                        flag = j - 1;
+                }
+            }
+            const bool xor_flag = instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_XOR;
+            auto buffer_begin = flag;
+            if (xor_flag) {
+                if (instructions[flag].operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                    instructions[flag].operands[0].size != 8 || instructions[flag].operands[1].size != 8 ||
+                    Dependency(instructions[flag].operands[0].reg.value) == Dependency(asset))
+                    continue;
+                for (std::size_t j = flag; j > 0 && a.address - instructions[j - 1].address < 0x800; --j) {
+                    const auto& d = instructions[j - 1];
+                    bool writes =
+                        d.instruction.meta.category == ZYDIS_CATEGORY_CALL && (Dependency(asset) & 0xf07u);
+                    for (unsigned operand = 0; operand < d.instruction.operand_count; ++operand) {
+                        const auto& o = d.operands[operand];
+                        writes |= o.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                            (o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+                            (Dependency(o.reg.value) & Dependency(asset));
+                    }
+                    if (!writes)
+                        continue;
+                    if (d.instruction.mnemonic == ZYDIS_MNEMONIC_XOR && d.operands[0].size == 64 &&
+                        d.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER && d.operands[1].size == 64)
+                        buffer_begin = j;
+                    break;
+                }
+                if (buffer_begin == flag)
+                    continue;
+            }
+            auto buffer = Flow(code, buffer_begin, pair, {asset}, {a.operands[1].mem.base});
+
+            if (!buffer) {
+                failed(3, "pose buffer dataflow not proven", a.address);
+                continue;
+            }
+
+            auto consume = flag;
+            auto decoded_asset = asset;
+            const bool encoded_flag = instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_ADD;
+            for (std::size_t j = flag; j > 0; --j) {
+                const auto& d = instructions[j - 1];
+                bool writes = false;
                 for (unsigned k = 0; k < d.instruction.operand_count; ++k) {
                     const auto& o = d.operands[k];
                     writes |= o.type == ZYDIS_OPERAND_TYPE_REGISTER &&
                         (o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
-                        (Dependency(o.reg.value) & Dependency(asset));
+                        Dependency(o.reg.value) == Dependency(asset);
                 }
-                if (writes)
-                    break;
-                const auto& o = d.operands[1];
-                if (d.instruction.mnemonic == ZYDIS_MNEMONIC_ADD && o.type == ZYDIS_OPERAND_TYPE_MEMORY &&
-                    o.size == member.size && o.mem.base == member.mem.base &&
-                    o.mem.index == ZYDIS_REGISTER_NONE && o.mem.disp.value == member.mem.disp.value)
-                    flag = j - 1;
-            }
-        }
-        auto buffer = Flow(code, flag, pair, {asset}, {a.operands[1].mem.base});
-        if (!buffer) {
-            failed(3, "pose buffer dataflow not proven", a.address);
-            continue;
-        }
-
-        auto consume = flag;
-        auto decoded_asset = asset;
-        const bool encoded_flag = instructions[flag].instruction.mnemonic == ZYDIS_MNEMONIC_ADD;
-        for (std::size_t j = flag; j > 0; --j) {
-            const auto& d = instructions[j - 1];
-            bool writes = false;
-            for (unsigned k = 0; k < d.instruction.operand_count; ++k) {
-                const auto& o = d.operands[k];
-                writes |= o.type == ZYDIS_OPERAND_TYPE_REGISTER &&
-                    (o.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
-                    Dependency(o.reg.value) == Dependency(asset);
-            }
-            if (!writes)
-                continue;
-            if (d.instruction.mnemonic != ZYDIS_MNEMONIC_XOR ||
-                d.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER)
-                break;
-            bool guarded = false;
-            for (std::size_t k = j - 1; k > 0 && j - k < 64; --k) {
-                const auto& guard = instructions[k - 1];
-                if (guard.instruction.mnemonic != ZYDIS_MNEMONIC_CMOVB ||
-                    guard.operands[0].reg.value != asset ||
-                    guard.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER)
+                if (!writes)
                     continue;
-                const auto zero = guard.operands[1].reg.value;
-                for (std::size_t n = k - 1; n > 0 && k - n < 64; --n) {
-                    const auto& z = instructions[n - 1];
-                    if (z.instruction.mnemonic == ZYDIS_MNEMONIC_XOR &&
-                        z.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-                        z.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-                        Dependency(z.operands[0].reg.value) == Dependency(zero) &&
-                        z.operands[0].reg.value == z.operands[1].reg.value) {
-                        guarded = true;
-                        break;
+                if (d.instruction.mnemonic != ZYDIS_MNEMONIC_XOR ||
+                    d.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER)
+                    break;
+                bool guarded = false;
+                for (std::size_t k = j - 1; k > 0 && j - k < 64; --k) {
+                    const auto& guard = instructions[k - 1];
+                    if (guard.instruction.mnemonic != ZYDIS_MNEMONIC_CMOVB ||
+                        guard.operands[0].reg.value != asset ||
+                        guard.operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER)
+                        continue;
+                    const auto zero = guard.operands[1].reg.value;
+                    for (std::size_t n = k - 1; n > 0 && k - n < 64; --n) {
+                        const auto& z = instructions[n - 1];
+                        if (z.instruction.mnemonic == ZYDIS_MNEMONIC_XOR &&
+                            z.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                            z.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                            Dependency(z.operands[0].reg.value) == Dependency(zero) &&
+                            z.operands[0].reg.value == z.operands[1].reg.value) {
+                            guarded = true;
+                            break;
+                        }
                     }
+                    break;
+                }
+                if (guarded) {
+                    consume = j - 1;
+                    decoded_asset = d.operands[1].reg.value;
                 }
                 break;
             }
-            if (guarded) {
-                consume = j - 1;
-                decoded_asset = d.operands[1].reg.value;
-            }
-            break;
-        }
-        if (consume == flag) {
-            failed(4, "pose asset xor and conditional owner not proven", instructions[flag].address);
-            continue;
-        }
-        failed(5, "pose selector branches or asset dataflow not proven", instructions[consume].address);
-        for (std::size_t branch = 1; branch < flag; ++branch) {
-            auto test_index = branch - 1;
-            while (test_index > 0 && branch - test_index < 8) {
-                const auto* flags = instructions[test_index].instruction.cpu_flags;
-                if (flags && (flags->modified | flags->set_0 | flags->set_1 | flags->undefined))
-                    break;
-                --test_index;
-            }
-            const auto& test = instructions[test_index];
-            const auto& conditional = instructions[branch];
-            if (test.instruction.mnemonic != ZYDIS_MNEMONIC_TEST ||
-                test.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
-                test.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE || test.operands[1].imm.value.u != 1 ||
-                conditional.instruction.meta.category != ZYDIS_CATEGORY_COND_BR)
+            if (consume == flag) {
+                failed(4, "pose asset xor and conditional owner not proven", instructions[flag].address);
                 continue;
-            const auto other = target(conditional);
-            if (other >= instructions.size() || other <= branch)
-                continue;
-            auto join = instructions.size(), jump = join;
-            for (std::size_t j = branch + 1; j < instructions.size() && j < branch + 192; ++j) {
-                if (instructions[j].instruction.mnemonic == ZYDIS_MNEMONIC_JMP) {
-                    const auto to = target(instructions[j]);
-                    if (to > other && to < flag) {
-                        join = to;
-                        jump = j;
-                    }
-                    break;
+            }
+            failed(5, "pose selector branches or asset dataflow not proven", instructions[consume].address);
+            for (std::size_t branch = 1; branch < flag; ++branch) {
+                auto test_index = branch - 1;
+                while (test_index > 0 && branch - test_index < 8) {
+                    const auto* flags = instructions[test_index].instruction.cpu_flags;
+                    if (flags && (flags->modified | flags->set_0 | flags->set_1 | flags->undefined))
+                        break;
+                    --test_index;
                 }
-                if (instructions[j].instruction.meta.category == ZYDIS_CATEGORY_CALL || j == other)
-                    break;
-            }
-            if (join == instructions.size())
-                for (std::size_t j = other; j < instructions.size() && j < other + 192; ++j) {
+                const auto& test = instructions[test_index];
+                const auto& conditional = instructions[branch];
+                if (test.instruction.mnemonic != ZYDIS_MNEMONIC_TEST ||
+                    test.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+                    test.operands[1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+                    (test.operands[1].imm.value.u != 1 &&
+                        (!xor_flag || !std::has_single_bit(test.operands[1].imm.value.u) ||
+                            test.operands[1].imm.value.u > 0xffffffffu)) ||
+                    conditional.instruction.meta.category != ZYDIS_CATEGORY_COND_BR)
+                    continue;
+                const auto other = target(conditional);
+                if (other >= instructions.size() || other <= branch)
+                    continue;
+                auto join = instructions.size(), jump = join;
+                for (std::size_t j = branch + 1; j < instructions.size() && j < branch + 192; ++j) {
                     if (instructions[j].instruction.mnemonic == ZYDIS_MNEMONIC_JMP) {
                         const auto to = target(instructions[j]);
-                        if (to > branch && to < flag && to < other) {
+                        if (to > other && (to < flag || (proof && to == flag))) {
                             join = to;
                             jump = j;
                         }
                         break;
                     }
-                    if (instructions[j].instruction.meta.category == ZYDIS_CATEGORY_CALL)
+                    if (instructions[j].instruction.meta.category == ZYDIS_CATEGORY_CALL || j == other)
                         break;
                 }
-            if (join == instructions.size())
-                continue;
-            const auto first_end = other < join ? jump : join;
-            const auto second_end = other < join ? join : jump;
-            std::array<std::map<ZydisRegister, std::vector<std::int64_t>>, 2> fields;
-            for (unsigned arm = 0; arm < 2; ++arm) {
-                const auto arm_begin = arm ? other : branch + 1;
-                for (std::size_t j = arm_begin; j < (arm ? second_end : first_end); ++j) {
-                    const auto& d = instructions[j];
-                    for (unsigned k = 0; k < d.instruction.operand_count_visible; ++k) {
-                        const auto& o = d.operands[k];
-                        if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.size == 64 &&
-                            (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ) &&
-                            o.mem.index == ZYDIS_REGISTER_NONE && o.mem.disp.value > 0 &&
-                            Dependency(o.mem.base) && o.mem.base != ZYDIS_REGISTER_RSP) {
-                            auto receiver = o.mem.base;
-                            if (encoded_flag)
-                                for (std::size_t alias = j;
-                                    alias > arm_begin && receiver != ZYDIS_REGISTER_NONE; --alias) {
-                                    const auto& previous = instructions[alias - 1];
-                                    bool writes = previous.instruction.meta.category == ZYDIS_CATEGORY_CALL &&
-                                        (Dependency(receiver) & 0xf07u);
-                                    for (unsigned operand = 0; operand < previous.instruction.operand_count;
-                                        ++operand) {
-                                        const auto& value = previous.operands[operand];
-                                        writes |= value.type == ZYDIS_OPERAND_TYPE_REGISTER &&
-                                            (value.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
-                                            (Dependency(value.reg.value) & Dependency(receiver));
+                if (join == instructions.size())
+                    for (std::size_t j = other; j < instructions.size() && j < other + 192; ++j) {
+                        if (instructions[j].instruction.mnemonic == ZYDIS_MNEMONIC_JMP) {
+                            const auto to = target(instructions[j]);
+                            if (to > branch && (to < flag || (proof && to == flag)) && to < other) {
+                                join = to;
+                                jump = j;
+                            }
+                            break;
+                        }
+                        if (instructions[j].instruction.meta.category == ZYDIS_CATEGORY_CALL)
+                            break;
+                    }
+                if (join == instructions.size())
+                    continue;
+                const auto first_end = other < join ? jump : join;
+                const auto second_end = other < join ? join : jump;
+                std::array<std::map<ZydisRegister, std::vector<std::int64_t>>, 2> fields;
+                for (unsigned arm = 0; arm < 2; ++arm) {
+                    const auto arm_begin = arm ? other : branch + 1;
+                    for (std::size_t j = arm_begin; j < (arm ? second_end : first_end); ++j) {
+                        const auto& d = instructions[j];
+                        for (unsigned k = 0; k < d.instruction.operand_count_visible; ++k) {
+                            const auto& o = d.operands[k];
+                            if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.size == 64 &&
+                                (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ) &&
+                                o.mem.index == ZYDIS_REGISTER_NONE && o.mem.disp.value > 0 &&
+                                Dependency(o.mem.base) && o.mem.base != ZYDIS_REGISTER_RSP) {
+                                auto receiver = o.mem.base;
+                                if (encoded_flag)
+                                    for (std::size_t alias = j;
+                                        alias > arm_begin && receiver != ZYDIS_REGISTER_NONE; --alias) {
+                                        const auto& previous = instructions[alias - 1];
+                                        bool writes =
+                                            previous.instruction.meta.category == ZYDIS_CATEGORY_CALL &&
+                                            (Dependency(receiver) & 0xf07u);
+                                        for (unsigned operand = 0;
+                                            operand < previous.instruction.operand_count; ++operand) {
+                                            const auto& value = previous.operands[operand];
+                                            writes |= value.type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                                                (value.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) &&
+                                                (Dependency(value.reg.value) & Dependency(receiver));
+                                        }
+                                        if (!writes)
+                                            continue;
+                                        receiver = previous.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                                                previous.operands[0].size == 64 &&
+                                                previous.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                                                !(previous.operands[0].actions &
+                                                    ZYDIS_OPERAND_ACTION_CONDWRITE)
+                                            ? previous.operands[1].reg.value
+                                            : ZYDIS_REGISTER_NONE;
                                     }
-                                    if (!writes)
-                                        continue;
-                                    receiver = previous.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
-                                            previous.operands[0].size == 64 &&
-                                            previous.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-                                            !(previous.operands[0].actions & ZYDIS_OPERAND_ACTION_CONDWRITE)
-                                        ? previous.operands[1].reg.value
-                                        : ZYDIS_REGISTER_NONE;
-                                }
-                            if (receiver != ZYDIS_REGISTER_NONE)
-                                fields[arm][receiver].push_back(o.mem.disp.value);
+                                if (receiver != ZYDIS_REGISTER_NONE)
+                                    fields[arm][receiver].push_back(o.mem.disp.value);
+                            }
                         }
                     }
                 }
-            }
-            for (const auto& [receiver, offsets] : fields[0]) {
-                if (!fields[1].contains(receiver))
-                    continue;
-                std::size_t start = branch;
-                Location input{receiver};
-                for (std::size_t j = branch - 1; j > 0 && test.address - instructions[j - 1].address < 0x400;
-                    --j) {
-                    const auto& d = instructions[j - 1];
-                    for (unsigned k = 0; k < d.instruction.operand_count_visible; ++k) {
-                        const auto& o = d.operands[k];
-                        if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == receiver &&
-                            o.mem.index == ZYDIS_REGISTER_NONE && o.mem.disp.value > 0 &&
-                            (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ)) {
-                            start = j - 1;
+                for (const auto& [receiver, offsets] : fields[0]) {
+                    if (!fields[1].contains(receiver))
+                        continue;
+                    std::size_t start = branch;
+                    Location input{receiver};
+                    for (std::size_t j = branch - 1;
+                        j > 0 && test.address - instructions[j - 1].address < 0x400; --j) {
+                        const auto& d = instructions[j - 1];
+                        for (unsigned k = 0; k < d.instruction.operand_count_visible; ++k) {
+                            const auto& o = d.operands[k];
+                            if (o.type == ZYDIS_OPERAND_TYPE_MEMORY && o.mem.base == receiver &&
+                                o.mem.index == ZYDIS_REGISTER_NONE && o.mem.disp.value > 0 &&
+                                (o.actions & ZYDIS_OPERAND_ACTION_MASK_READ)) {
+                                start = j - 1;
+                                break;
+                            }
+                        }
+                        if (start != branch)
+                            break;
+                    }
+                    if (start == branch)
+                        continue;
+                    for (std::size_t j = start;
+                        j > 0 && instructions[start].address - instructions[j - 1].address < 0x100; --j) {
+                        const auto& d = instructions[j - 1];
+                        if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
+                            d.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+                            d.operands[0].reg.value == receiver && LocalSlot(d.operands[1]) &&
+                            d.operands[1].size == 64) {
+                            input = {ZYDIS_REGISTER_NONE, d.operands[1].mem.disp.value, true};
                             break;
                         }
                     }
-                    if (start != branch)
-                        break;
-                }
-                if (start == branch)
-                    continue;
-                for (std::size_t j = start;
-                    j > 0 && instructions[start].address - instructions[j - 1].address < 0x100; --j) {
-                    const auto& d = instructions[j - 1];
-                    if (d.instruction.mnemonic == ZYDIS_MNEMONIC_MOV &&
-                        d.operands[0].type == ZYDIS_OPERAND_TYPE_REGISTER &&
-                        d.operands[0].reg.value == receiver && LocalSlot(d.operands[1]) &&
-                        d.operands[1].size == 64) {
-                        input = {ZYDIS_REGISTER_NONE, d.operands[1].mem.disp.value, true};
-                        break;
-                    }
-                }
 
-                if (auto selector = Flow(code, start, encoded_flag ? flag : consume, input,
-                        {encoded_flag ? asset : decoded_asset}))
-                    result.push_back({std::move(*selector), *buffer});
+                    const auto selector_end = proof ? buffer_begin : encoded_flag ? flag : consume;
+                    const auto selector_output = proof || encoded_flag ? asset : decoded_asset;
+                    auto selector = Flow(code, start, selector_end, input, {selector_output});
+                    if (!selector && proof && input.stack)
+                        selector = Flow(code, start, selector_end, {receiver}, {selector_output});
+                    if (selector)
+                        result.push_back({std::move(*selector), *buffer});
+                }
             }
         }
     }

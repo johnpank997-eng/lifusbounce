@@ -26,6 +26,7 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                 continue;
             const auto parent = cpu.Get(expression.output);
             trace.Probe("root receiver pointer", index, teb, parent, Pointer(parent));
+            ReportReceiverDiagnostics("root", index, teb, parent);
             if (!Pointer(parent) || !Section(Q(parent))) {
                 trace.Count("root_pointer_rejected");
                 continue;
@@ -41,6 +42,7 @@ auto Reader::Implementation::Resolve(Address teb, Address tls) -> Environment {
                         continue;
                     const auto manager = cpu.Get(path.output);
                     trace.Probe("manager receiver pointer", candidate, parent, manager, Pointer(manager));
+                    ReportReceiverDiagnostics("manager", candidate, teb, manager);
                     if (!Pointer(manager) || !Section(Q(manager))) {
                         trace.Count("manager_pointer_rejected");
                         continue;

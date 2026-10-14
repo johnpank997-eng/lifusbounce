@@ -67,6 +67,8 @@
     <ClCompile Include="third_party\miniz\miniz.c"><ObjectFileName>$(IntDir)third_party_miniz.obj</ObjectFileName></ClCompile>
     <ClCompile Include="third_party\miniz\miniz_tdef.c"><ObjectFileName>$(IntDir)third_party_miniz_tdef.obj</ObjectFileName></ClCompile>
     <ClCompile Include="src\sdk\diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_diagnostics.obj</ObjectFileName></ClCompile>
+    <ClCompile Include="src\sdk\feature_diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_feature_diagnostics.obj</ObjectFileName></ClCompile>
+    <ClInclude Include="src\sdk\feature_diagnostics.hpp" />
     <ClCompile Include="src\sdk\reader_diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_reader_diagnostics.obj</ObjectFileName></ClCompile>
     <ClCompile Include="src\sdk\image_diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_image_diagnostics.obj</ObjectFileName></ClCompile>
     <ClCompile Include="src\sdk\execution_diagnostics.cpp"><ObjectFileName>$(IntDir)sdk_execution_diagnostics.obj</ObjectFileName></ClCompile>

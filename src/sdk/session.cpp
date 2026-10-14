@@ -300,7 +300,6 @@ void Session::Implementation::Scan(std::stop_token stop) {
             discovery.Failure(error);
             throw;
         }
-        discovery.Report();
         diagnostics::Phase("selected character discovery", 0.90f);
         if (!stop.stop_requested() && nt->FileHeader.NumberOfSections &&
             nt->FileHeader.NumberOfSections <= 96) {
@@ -318,13 +317,32 @@ void Session::Implementation::Scan(std::stop_token stop) {
                         if (read.Complete())
                             native.selected_operator =
                                 locators::DiscoverOperatorSelection(code, header.BaseOfCode, module->address,
-                                    functions, symbols, section.VirtualAddress);
+                                    functions, symbols, section.VirtualAddress,
+                                    [&](std::string_view rule, std::uint64_t instruction,
+                                        std::uint64_t observed) {
+                                        auto found = std::upper_bound(functions.begin(), functions.end(),
+                                            instruction - module->address,
+                                            [](auto address, const auto& f) { return address < f.begin; });
+                                        locators::FunctionRecord function{};
+                                        std::size_t index{};
+                                        if (found != functions.begin()) {
+                                            --found;
+                                            if (instruction >= module->address + found->begin &&
+                                                instruction < module->address + found->end) {
+                                                function = *found;
+                                                index = static_cast<std::size_t>(found - functions.begin());
+                                            }
+                                        }
+                                        discovery.Enter("selected character", index, function);
+                                        discovery.Validation(rule, instruction, observed);
+                                    });
                         else
                             diagnostics::Write("optional_section_failed",
                                 {{"role", "selected character"}, {"win32", read.error},
                                     {"transferred", read.transferred}});
                     }
         }
+        discovery.Report();
     }
     if (stop.stop_requested())
         return;

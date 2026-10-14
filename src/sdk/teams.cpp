@@ -82,7 +82,13 @@ auto Reader::Implementation::DiscoverTeam(CachedEntity& c) -> void {
 }
 
 auto Reader::Implementation::SideFor(Address entity, CachedEntity& c) -> Address {
+    FeatureEvidence evidence{.entity = entity, .receiver = c.team_source};
+    auto stage = FeatureStage::component;
+    const auto record = [&](FeatureStatus status) {
+        feature_trace.Record(Feature::team, stage, status, evidence);
+    };
     if (!c.team_source) {
+        record(FeatureStatus::missing_component);
         ClearTeam(c);
         return 0;
     }
@@ -91,6 +97,7 @@ auto Reader::Implementation::SideFor(Address entity, CachedEntity& c) -> Address
         if (Q(entity) != c.vtable || Q(entity + c.component_offset) != c.list ||
             (Read<std::uint32_t>(entity + c.component_offset + 8) & 0x3fffffffu) != c.component_count ||
             Q(c.list + c.team_source_index * 8ull) != c.team_source || Hash(c.team_source) != 0xcdfd8752u) {
+            record(FeatureStatus::state_changed);
             ClearTeam(c);
             c.team_source = 0;
             c.next_components = {};
@@ -105,17 +112,29 @@ auto Reader::Implementation::SideFor(Address entity, CachedEntity& c) -> Address
                 Hash(c.team_component) != 0xd2305a06u))
             ClearTeam(c);
         if (!c.team_component && now >= c.next_team_attempt) {
+            stage = FeatureStage::discovery;
             c.next_team_attempt = now + std::chrono::milliseconds(100);
             DiscoverTeam(c);
         }
-        if (!c.team_component)
+        if (!c.team_component) {
+            record(FeatureStatus::missing_path);
             return 0;
+        }
+        stage = FeatureStage::value;
+        evidence.receiver = c.team_component;
+        evidence.parent = c.team_parent;
+        evidence.field = c.team_field;
         const auto slot = Q(c.team_component + c.team_field);
         const auto team = Q(slot);
-        if (Hash(team) != 0xadeca645u) {
+        evidence.value = team;
+        evidence.expected = 0xadeca645u;
+        evidence.observed = Hash(team);
+        if (evidence.observed != evidence.expected) {
+            record(FeatureStatus::type_rejected);
             ClearTeam(c);
             return 0;
         }
+        stage = FeatureStage::snapshot;
         if (Q(entity) != c.vtable || Q(entity + c.component_offset) != c.list ||
             (Read<std::uint32_t>(entity + c.component_offset + 8) & 0x3fffffffu) != c.component_count ||
             Q(c.list + c.team_source_index * 8ull) != c.team_source ||
@@ -127,8 +146,13 @@ auto Reader::Implementation::SideFor(Address entity, CachedEntity& c) -> Address
             throw ReadFailure{ERROR_NOT_READY};
         c.team = team;
         c.team_at = now;
+        record(FeatureStatus::ready);
         return team;
-    } catch (ReadFailure) {
+    } catch (ReadFailure failure) {
+        evidence.win32 = failure.error;
+        record(failure.error == ERROR_DUP_NAME     ? FeatureStatus::ambiguous_path
+                : failure.error == ERROR_NOT_READY ? FeatureStatus::state_changed
+                                                   : FeatureStatus::read_failed);
 
         ClearTeam(c);
         c.next_team_attempt = now + std::chrono::milliseconds(100);
@@ -139,47 +163,79 @@ auto Reader::Implementation::SideFor(Address entity, CachedEntity& c) -> Address
 auto Reader::Implementation::AffiliationFor(
     Address profile, std::optional<std::size_t>& binding, const Environment& env) -> Address {
     Address accepted{};
+    FeatureEvidence evidence{.receiver = profile};
+    const auto record = [&](FeatureStatus status) {
+        feature_trace.Record(Feature::team, FeatureStage::affiliation, status, evidence);
+    };
     try {
-        if (!profile)
+        if (!profile) {
+            record(FeatureStatus::uninitialized);
             return 0;
+        }
+        if (native.affiliations.empty())
+            record(FeatureStatus::missing_path);
         std::optional<std::size_t> matched;
         for (std::size_t i = 0; i < native.affiliations.size(); ++i) {
             if (binding && *binding != i)
                 continue;
             const auto& path = native.affiliations[i];
-            if (path.field + 8 > Extent(profile, 0x10000))
+            evidence.path = i;
+            evidence.field = path.field;
+            evidence.extent = Extent(profile, 0x10000);
+            if (path.field + 8 > evidence.extent) {
+                record(FeatureStatus::extent_rejected);
                 continue;
+            }
             const auto encoded = Q(profile + path.field);
             cpu.Reset(env.teb);
             cpu.Set(path.profile, profile);
-            if (!cpu.Run(path.object.code).Complete())
+            if (!trace.Run(cpu, path.object.code, "team_affiliation", i, module.address)) {
+                record(FeatureStatus::emulation_failed);
                 continue;
+            }
             const auto team = cpu.Get(path.object.output);
-            if (team == path.null_value || !team)
+            evidence.value = team;
+            evidence.expected = path.null_value;
+            if (team == path.null_value || !team) {
+                record(FeatureStatus::uninitialized);
                 continue;
+            }
             if (path.pointer_identity) {
-                if (!Pointer(team))
+                if (!Pointer(team)) {
+                    record(FeatureStatus::invalid_value);
                     continue;
+                }
                 TypeInfo(team);
             }
-            if (Q(profile + path.field) != encoded)
+            if (Q(profile + path.field) != encoded) {
+                record(FeatureStatus::state_changed);
                 continue;
-            if (accepted && accepted != team)
+            }
+            if (accepted && accepted != team) {
+                record(FeatureStatus::ambiguous_path);
                 return 0;
+            }
             accepted = team;
             if (!matched)
                 matched = i;
         }
         binding = matched;
+        if (accepted)
+            record(FeatureStatus::ready);
         return accepted;
-    } catch (ReadFailure) {
+    } catch (ReadFailure failure) {
+        evidence.win32 = failure.error;
+        record(FeatureStatus::read_failed);
         return 0;
     }
 }
 
-auto Reader::Implementation::TeamFor(Address entity, CachedEntity& c, const Environment&) -> Address {
-
-    return SideFor(entity, c);
+auto Reader::Implementation::TeamFor(Address entity, CachedEntity& c, const Environment& env) -> Address {
+    const auto side = SideFor(entity, c);
+    if (!side && c.team_source)
+        feature_trace.Receiver(process, module, sections, native.metadata, Feature::team,
+            FeatureStage::component, 0, env.teb, entity, c.team_source);
+    return side;
 }
 
 auto Reader::Implementation::ValidLocalProfile(Address profile) -> bool {

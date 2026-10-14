@@ -5,6 +5,7 @@
 #include "sdk/operator_animation.hpp"
 #include "sdk/equipment.hpp"
 #include "sdk/diagnostics.hpp"
+#include "sdk/feature_diagnostics.hpp"
 #include "core/emulator.hpp"
 #include <algorithm>
 #include <cmath>
@@ -51,6 +52,10 @@ struct Reader::Implementation {
     std::string message = "resolving live data";
     DWORD last_error = ERROR_SUCCESS;
     RuntimeDiagnostics trace;
+    FeatureDiagnostics feature_trace;
+    std::array<std::array<Address, 16>, 2> diagnostic_receivers{};
+    std::array<unsigned, 2> diagnostic_receiver_counts{};
+    std::array<bool, 2> diagnostic_receiver_limit_reported{};
     mutable std::array<std::optional<std::size_t>, 4> reported_paths;
     std::uint32_t tls_index{};
     std::vector<std::pair<Address, Address>> sections;
@@ -193,6 +198,9 @@ struct Reader::Implementation {
     std::string EmulationMessage() const;
 
     bool Section(Address at) const;
+
+    void ReportReceiverDiagnostics(
+        std::string_view role, std::size_t path, Address teb, Address receiver) noexcept;
 
     Implementation(const Memory& p, ModuleInfo m, IMAGE_NT_HEADERS64 h, locators::NativeDescriptor n);
 

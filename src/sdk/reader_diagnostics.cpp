@@ -2,12 +2,138 @@
 #include "core/diagnostics.hpp"
 
 namespace base::sdk {
+void Reader::Implementation::ReportReceiverDiagnostics(
+    std::string_view role, std::size_t path, Address teb, Address receiver) noexcept {
+    if (!diagnostics::Enabled() || !Pointer(receiver) || sizeof(Address) > 0x800000000000ull - receiver)
+        return;
+    try {
+        const auto role_index = role == "root" ? 0u : 1u;
+        auto& receivers = diagnostic_receivers[role_index];
+        auto& receiver_count = diagnostic_receiver_counts[role_index];
+        if (std::find(receivers.begin(), receivers.begin() + receiver_count, receiver) !=
+            receivers.begin() + receiver_count)
+            return;
+        if (receiver_count >= receivers.size()) {
+            if (!diagnostic_receiver_limit_reported[role_index]) {
+                diagnostic_receiver_limit_reported[role_index] = true;
+                diagnostics::Write("receiver_diagnostic_limit",
+                    {{"role", role}, {"path_index", path}, {"teb", diagnostics::Hex(teb)},
+                        {"receiver", diagnostics::Hex(receiver)}, {"receiver_limit", 16u},
+                        {"metadata_recipe_limit", 16u}, {"complete", false}});
+            }
+            return;
+        }
+        receivers[receiver_count++] = receiver;
+        DWORD vtable_error{};
+        const auto vtable = process.Read<Address>(receiver, &vtable_error);
+        const auto table_valid = vtable && Pointer(*vtable) && Section(*vtable);
+        diagnostics::Write("receiver_diagnostic_begin",
+            {{"role", role}, {"sample", receiver_count - 1}, {"path_index", path},
+                {"teb", diagnostics::Hex(teb)}, {"receiver", diagnostics::Hex(receiver)},
+                {"vtable", diagnostics::Hex(vtable.value_or(0))},
+                {"vtable_read_complete", vtable.has_value()}, {"vtable_win32", vtable_error},
+                {"vtable_in_image_section", table_valid}, {"metadata_recipes", native.metadata.size()},
+                {"receiver_limit", 16u}, {"metadata_recipe_limit", 16u}, {"selected_by_reader", false}});
+        if (!table_valid) {
+            diagnostics::Write("receiver_diagnostic_end",
+                {{"role", role}, {"receiver", diagnostics::Hex(receiver)}, {"recipes_attempted", 0u},
+                    {"complete", false}, {"reason", "vtable read or section check failed"}});
+            return;
+        }
+        const auto recipes = std::min<std::size_t>(native.metadata.size(), 16);
+        Emulator diagnostic_cpu(process);
+        for (std::size_t index = 0; index < recipes; ++index) {
+            const auto& recipe = native.metadata[index];
+            const auto link_address = *vtable + recipe.table_field;
+            DWORD link_error = ERROR_INVALID_ADDRESS;
+            std::optional<Address> info;
+            if (Pointer(link_address) && Section(link_address) && Section(link_address + sizeof(Address) - 1))
+                info = process.Read<Address>(link_address, &link_error);
+            const bool info_valid = info && Pointer(*info) && Section(*info);
+            DWORD hash_error = ERROR_INVALID_ADDRESS, extent_error = ERROR_INVALID_ADDRESS,
+                  low_error = ERROR_INVALID_ADDRESS, high_error = ERROR_INVALID_ADDRESS;
+            std::optional<std::uint32_t> encoded_hash;
+            std::optional<Address> extent;
+            std::optional<std::uint16_t> low, high;
+            EmulationResult result{EmulationStatus::read_failed};
+            bool decode_attempted{};
+            std::uint32_t hash{};
+            if (info_valid) {
+                if (Section(*info + recipe.hash_field) && Section(*info + recipe.hash_field + 3))
+                    encoded_hash = process.Read<std::uint32_t>(*info + recipe.hash_field, &hash_error);
+                if (Section(*info + 0x24) && Section(*info + 0x2b))
+                    extent = process.Read<Address>(*info + 0x24, &extent_error);
+                if (Section(*info + 0x40) && Section(*info + 0x41))
+                    low = process.Read<std::uint16_t>(*info + 0x40, &low_error);
+                if (Section(*info + 0x42) && Section(*info + 0x43))
+                    high = process.Read<std::uint16_t>(*info + 0x42, &high_error);
+                diagnostic_cpu.Reset(teb);
+                diagnostic_cpu.Set(ZYDIS_REGISTER_RCX, receiver);
+                decode_attempted = true;
+                result = trace.Execute(
+                    diagnostic_cpu, recipe.decode.code, "receiver_metadata_decode", index, module.address);
+                if (result.Complete())
+                    hash = static_cast<std::uint32_t>(diagnostic_cpu.Get(recipe.decode.output));
+            }
+            DWORD receiver_reread_error{}, link_reread_error = ERROR_INVALID_ADDRESS;
+            const auto receiver_reread = process.Read<Address>(receiver, &receiver_reread_error);
+            std::optional<Address> link_reread;
+            if (Pointer(link_address) && Section(link_address) && Section(link_address + sizeof(Address) - 1))
+                link_reread = process.Read<Address>(link_address, &link_reread_error);
+            const bool receiver_stable = receiver_reread && *receiver_reread == *vtable;
+            const bool link_stable = info && link_reread && *link_reread == *info;
+            const bool complete = info_valid && encoded_hash && extent && low && high && result.Complete() &&
+                receiver_stable && link_stable;
+            diagnostics::Write("receiver_metadata_candidate",
+                {{"role", role}, {"path_index", path}, {"teb", diagnostics::Hex(teb)},
+                    {"receiver", diagnostics::Hex(receiver)}, {"recipe_index", index},
+                    {"vtable", diagnostics::Hex(*vtable)}, {"table_field", recipe.table_field},
+                    {"hash_field", recipe.hash_field}, {"link_address", diagnostics::Hex(link_address)},
+                    {"metadata", diagnostics::Hex(info.value_or(0))},
+                    {"link_read_complete", info.has_value()}, {"link_win32", link_error},
+                    {"metadata_in_image_section", info_valid},
+                    {"encoded_hash", diagnostics::Hex(encoded_hash.value_or(0))},
+                    {"encoded_hash_read_complete", encoded_hash.has_value()},
+                    {"encoded_hash_win32", hash_error}, {"extent", extent.value_or(0)},
+                    {"extent_read_complete", extent.has_value()}, {"extent_win32", extent_error},
+                    {"subtype_lower", low ? static_cast<int>(*low) : -1}, {"subtype_lower_win32", low_error},
+                    {"subtype_upper", high ? static_cast<int>(*high) : -1},
+                    {"subtype_upper_win32", high_error}, {"interval_read_complete", low && high},
+                    {"decode_attempted", decode_attempted}, {"decode_complete", result.Complete()},
+                    {"decode_status", static_cast<unsigned>(result.status)}, {"decode_steps", result.steps},
+                    {"decode_stop_rva",
+                        result.address >= module.address ? diagnostics::Hex(result.address - module.address)
+                                                         : "outside image"},
+                    {"decode_mnemonic", ZydisMnemonicGetString(result.mnemonic)},
+                    {"hash", diagnostics::Hex(hash)},
+                    {"decode_begin_rva", diagnostics::Hex(recipe.decode.code.begin - module.address)},
+                    {"decode_end_rva", diagnostics::Hex(recipe.decode.code.end - module.address)},
+                    {"receiver_vtable_unchanged", receiver_stable},
+                    {"receiver_reread_win32", receiver_reread_error},
+                    {"metadata_link_unchanged", link_stable},
+                    {"metadata_link_reread_win32", link_reread_error}, {"data_complete", complete},
+                    {"actor_role_verified", false}, {"selected_by_reader", false}});
+        }
+        diagnostics::Write("receiver_diagnostic_end",
+            {{"role", role}, {"receiver", diagnostics::Hex(receiver)}, {"recipes_attempted", recipes},
+                {"complete", recipes && native.metadata.size() <= recipes},
+                {"reason",
+                    native.metadata.size() <= recipes ? "bounded sample finished"
+                                                      : "metadata recipe limit"}});
+    } catch (...) {
+        diagnostics::Write("receiver_diagnostic_failed",
+            {{"role", role}, {"path_index", path}, {"teb", teb}, {"receiver", receiver},
+                {"complete", false}});
+    }
+}
+
 void Reader::ReportDiagnostics(bool layouts) const noexcept {
     if (!diagnostics::Enabled())
         return;
     try {
         const auto& state = *impl_;
         state.trace.Report();
+        state.feature_trace.Report();
         const std::array paths{
             state.root_expression, state.camera_expression, state.manager_expression, state.array_expression};
         if (paths != state.reported_paths) {
@@ -45,6 +171,9 @@ void Reader::ReportDiagnostics(bool layouts) const noexcept {
                 {"metadata_selected", state.metadata.has_value()},
                 {"metadata_table_field", state.metadata ? state.metadata->table_field : 0u},
                 {"metadata_hash_field", state.metadata ? state.metadata->hash_field : 0u},
+                {"diagnostic_root_receivers", state.diagnostic_receiver_counts[0]},
+                {"diagnostic_manager_receivers", state.diagnostic_receiver_counts[1]},
+                {"diagnostic_receiver_limit", 16u}, {"diagnostic_metadata_recipe_limit", 16u},
                 {"tls_index", state.tls_index}, {"read_calls", reads.calls},
                 {"read_bytes_requested", reads.requested}, {"read_bytes_transferred", reads.transferred},
                 {"read_failures", reads.failures}, {"last_read_win32", reads.last_error},

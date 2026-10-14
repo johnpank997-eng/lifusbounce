@@ -94,7 +94,8 @@ struct OwnershipDescriptor {
     std::uint64_t owner_type{}, profile_type{};
 };
 
-[[nodiscard]] std::optional<OwnershipDescriptor> OwnerProfile(const Emulator::Program& code);
+[[nodiscard]] std::optional<OwnershipDescriptor> OwnerProfile(
+    const Emulator::Program& code, const ValidationObserver& validation = {});
 
 struct HealthDescriptor {
     Emulator::Program code;
@@ -115,7 +116,8 @@ struct OperatorNameDescriptor {
 
 [[nodiscard]] std::optional<OperatorSelectionDescriptor> OperatorSelection(const Emulator::Program& consumer,
     std::span<const std::byte> code, std::uint32_t code_rva, std::uint64_t module,
-    std::span<const FunctionRecord> functions, std::uint64_t missing_instance_string);
+    std::span<const FunctionRecord> functions, std::uint64_t missing_instance_string,
+    const ValidationObserver& validation = {});
 [[nodiscard]] std::optional<OperatorNameDescriptor> OperatorName(const Emulator::Program& getter);
 
 struct AffiliationDescriptor {
@@ -151,7 +153,8 @@ struct NativeDescriptor {
 
 [[nodiscard]] std::optional<OperatorSelectionDescriptor> DiscoverOperatorSelection(
     std::span<const std::byte> code, std::uint32_t code_rva, std::uint64_t module,
-    std::span<const FunctionRecord> functions, std::span<const std::byte> rdata, std::uint32_t rdata_rva);
+    std::span<const FunctionRecord> functions, std::span<const std::byte> rdata, std::uint32_t rdata_rva,
+    const ValidationObserver& validation = {});
 
 using DiscoveryObserver = std::function<void(std::string_view, const FunctionRecord&,
     std::span<const std::byte>, const Emulator::Program*, std::size_t)>;

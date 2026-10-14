@@ -140,12 +140,26 @@ auto Reader::Implementation::Poll(std::stop_token stop) -> std::shared_ptr<const
             }
         }
 
-        for (const auto& [entity, c] : cache)
+        for (const auto& [entity, c] : cache) {
+            if (c.animation_component && c.transform_component &&
+                std::none_of(
+                    actors.begin(), actors.end(), [&](const auto& actor) { return actor.entity == entity; }))
+                for (const auto feature : {Feature::name, Feature::health, Feature::operator_id,
+                         Feature::team, Feature::weapon, Feature::defuser})
+                    feature_trace.Record(feature, FeatureStage::snapshot, FeatureStatus::unavailable,
+                        {.entity = entity,
+                            .receiver = c.animation_component,
+                            .parent = c.transform_component,
+                            .value = c.pose_count,
+                            .other = c.rig && c.names && c.binding && !c.binding->ambiguous ? 1ull : 0ull,
+                            .expected = 1,
+                            .observed = 0});
             if (c.animation_component && c.transform_component) {
                 ++frame->players;
                 if (c.rig && c.names && c.binding && !c.binding->ambiguous)
                     ++frame->initialized;
             }
+        }
         if (!frame->players && !entries.empty() &&
             std::all_of(entries.begin(), entries.end(),
                 [&](Address entity) { return !Pointer(entity) || cache.contains(entity); })) {
@@ -172,6 +186,7 @@ auto Reader::Implementation::Poll(std::stop_token stop) -> std::shared_ptr<const
                 !std::binary_search(entries.begin(), entries.end(), item.first);
         });
         frame->local_player = local_player;
+        feature_trace.BeginCapture();
         const auto local_team = LocalTeamFor(env);
         std::size_t teammates{};
         frame->entities.reserve(actors.size());

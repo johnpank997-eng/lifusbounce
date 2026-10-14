@@ -50,12 +50,16 @@ auto Reader::Implementation::Evaluate(const locators::PointerDescriptor& path, A
     };
     std::vector<Address> seeds;
     seeds.reserve(path.seeds.size());
+    const auto seed_stage = stage == "operator_instance" ? "operator_instance_seed"
+        : stage == "operator_definition"                 ? "operator_definition_seed"
+        : stage == "operator_name_reference"             ? "operator_name_reference_seed"
+                                                         : "pose_seed";
     for (const auto& seed : path.seeds) {
         cpu.Reset(teb);
         put(path.input, object);
         const auto result = stage.empty()
             ? cpu.Run(seed.value.code)
-            : trace.Execute(cpu, seed.value.code, "pose_seed", index * 32 + seeds.size(), module.address);
+            : trace.Execute(cpu, seed.value.code, seed_stage, index * 32 + seeds.size(), module.address);
         if (!result.Complete()) {
             trace.Emulation("pointer_seed_emulation_failed", seeds.size(), result, module.address);
             emulation_error = result;
